@@ -1,5 +1,3 @@
----
-
 # 🧪 Compiscript – Arquitectura & Plan de Trabajo  
 *(Fase de Análisis Semántico – 3 personas)*
 
