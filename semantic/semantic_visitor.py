@@ -164,22 +164,243 @@ class SymbolCollector(CompiscriptVisitor):
         return None
 
 
+# =============================
+# PASS 2: Chequeo de tipos/uso
+# =============================
 class TypeCheckerVisitor(CompiscriptVisitor):
-    """
-    Pass 2: verifica tipos/uso de identificadores.
-    """
     def __init__(self, errors: ErrorCollector, root_scope: Scope, scopes_by_ctx: dict):
         self.errors = errors
         self.current = root_scope
         self.scopes_by_ctx = scopes_by_ctx
 
-    def visitChildren(self, node):
-        result = None
-        n = node.getChildCount()
+    def _enter_by_ctx(self, ctx: ParserRuleContext):
+        s = self.scopes_by_ctx.get(ctx)
+        if s: self.current = s
+
+    def _exit(self):
+        if self.current.parent: self.current = self.current.parent
+
+    # program / block / function: moverse por scopes ya construidos
+    def visitProgram(self, ctx: CompiscriptParser.ProgramContext):
+        self._enter_by_ctx(ctx); r = self.visitChildren(ctx); return r
+
+    def visitBlock(self, ctx: CompiscriptParser.BlockContext):
+        self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
+
+    def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
+        self._enter_by_ctx(ctx)
+        self.visit(ctx.block())
+        self._exit()
+        return None
+
+    # variableDeclaration: validar initializer si existe
+    def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
+        name = _first_identifier_text(ctx)
+        sym = self.current.resolve(name)
+        if ctx.initializer():
+            itype = self.visit(ctx.initializer())  # -> Type
+            if sym and not self._is_assignable(itype, sym.typ):
+                self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                                   f"No se puede asignar '{itype}' a '{sym.typ}' en inicialización de '{name}'.")
+            if sym: sym.initialized = True
+        return None
+
+    # constantDeclaration: const debe inicializarse y ser asignable
+    def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
+        name = _first_identifier_text(ctx)
+        sym = self.current.resolve(name)
+        if not ctx.expression():
+            self.errors.report(ctx.start.line, ctx.start.column, "E003", f"Constante '{name}' debe inicializarse.")
+            return None
+        itype = self.visit(ctx.expression())
+        if sym and not self._is_assignable(itype, sym.typ):
+            self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                               f"No se puede asignar '{itype}' a '{sym.typ}' en const '{name}'.")
+        if sym: sym.initialized = True
+        return None
+
+    # initializer: '=' expression
+    def visitInitializer(self, ctx: CompiscriptParser.InitializerContext):
+        return self.visit(ctx.expression())
+
+    # assignment (statement):
+    #   Identifier '=' expression ';'
+    # | expression '.' Identifier '=' expression ';'   (no soportado aún)
+    def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
+        # distinguir por número de expressions: 1 = simple, 2 = property
+        if len(ctx.expression()) == 1:
+            # simple: Identifier '=' expr
+            name = _first_identifier_text(ctx)
+            rtype = self.visit(ctx.expression(0))
+            if name is None:
+                self.errors.report(ctx.start.line, ctx.start.column, "E006",
+                                   "Asignación inválida (identificador esperado).")
+                return NULL
+            sym = self.current.resolve(name)
+            if not sym:
+                self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
+                return NULL
+            if sym.is_const:
+                self.errors.report(ctx.start.line, ctx.start.column, "E005", f"No se puede reasignar const '{name}'.")
+                return sym.typ
+            if not self._is_assignable(rtype, sym.typ):
+                self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                                   f"No se puede asignar '{rtype}' a '{sym.typ}'.")
+            else:
+                sym.initialized = True
+            return sym.typ
+        else:
+            # property assignment aún no implementado
+            self.errors.report(ctx.start.line, ctx.start.column, "E006",
+                               "Asignación a propiedad no soportada aún.")
+            # visitar RHS para seguir tipeando
+            self.visit(ctx.expression(1))
+            return NULL
+
+    # expressionStatement: expression ';'
+    def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
+        self.visit(ctx.expression()); return None
+
+    # ---- Expresiones ----
+    def visitExpression(self, ctx: CompiscriptParser.ExpressionContext):
+        return self.visitChildren(ctx)
+
+    def visitLiteralExpr(self, ctx: CompiscriptParser.LiteralExprContext):
+        txt = ctx.getText()
+        if txt == "true" or txt == "false": return BOOLEAN
+        if txt == "null": return NULL
+        if len(txt) >= 2 and ((txt[0] == '"' and txt[-1] == '"') or (txt[0] == "'" and txt[-1] == "'")):
+            return STRING
+        if txt.lstrip("-").isdigit(): return INTEGER
+        return NULL
+
+    # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
+    def visitPrimaryExpr(self, ctx: CompiscriptParser.PrimaryExprContext):
+        for ch in ctx.getChildren():
+            return ch.accept(self)
+        return NULL
+
+    # leftHandSide: primaryAtom (suffixOp)* ;
+    # Por ahora solo soportamos primaryAtom sin sufijos
+    def visitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
+        return self.visit(ctx.primaryAtom())
+
+    # primaryAtom:
+    #   Identifier           # IdentifierExpr
+    # | 'new' Identifier...  # NewExpr
+    # | 'this'               # ThisExpr
+    def visitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
+        name = ctx.Identifier().getText()
+        sym = self.current.resolve(name)
+        if not sym:
+            self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
+            return NULL
+        return sym.typ
+
+    def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
+        cname = ctx.Identifier().getText()
+        # En el futuro: validar existencia de la clase y constructor
+        return ClassType(cname)
+
+    def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
+        # Para ahora devolvemos NULL; luego lo ligamos al tipo de clase actual
+        return NULL
+
+    # arrayLiteral: '[' (expression (',' expression)*)? ']'
+    def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
+        exprs = ctx.expression()
+        if not exprs:
+            return ArrayType(NULL)
+        t0 = self.visit(exprs[0])
+        for e in exprs[1:]:
+            ti = self.visit(e)
+            if t0.name != ti.name:
+                self.errors.report(ctx.start.line, ctx.start.column, "E011",
+                                   f"Elementos de arreglo deben tener mismo tipo: {t0} vs {ti}.")
+        return ArrayType(t0)
+
+    # logical OR/AND
+    def visitLogicalOrExpr(self, ctx: CompiscriptParser.LogicalOrExprContext):
+        n = len(ctx.logicalAndExpr())
+        if n == 1:
+            return ctx.logicalAndExpr(0).accept(self)
         for i in range(n):
-            c = node.getChild(i)
-            result = c.accept(self)
-        return result
+            t = ctx.logicalAndExpr(i).accept(self)
+            if t != BOOLEAN:
+                self._op_err(ctx, "||", t, "boolean")
+        return BOOLEAN
+
+
+    def visitLogicalAndExpr(self, ctx: CompiscriptParser.LogicalAndExprContext):
+        n = len(ctx.equalityExpr())
+        if n == 1:
+            return ctx.equalityExpr(0).accept(self)
+        for i in range(n):
+            t = ctx.equalityExpr(i).accept(self)
+            if t != BOOLEAN:
+                self._op_err(ctx, "&&", t, "boolean")
+        return BOOLEAN
+
+
+    # ==, !=
+    def visitEqualityExpr(self, ctx: CompiscriptParser.EqualityExprContext):
+        n = len(ctx.relationalExpr())
+        if n == 1:
+            return ctx.relationalExpr(0).accept(self)
+        left = ctx.relationalExpr(0).accept(self)
+        for i in range(1, n):
+            right = ctx.relationalExpr(i).accept(self)
+            if not self._eq_compatible(left, right):
+                self._op_err(ctx, "==/!=", f"{left} vs {right}")
+        return BOOLEAN
+
+
+    # <,<=,>,>=  (integer)
+    def visitRelationalExpr(self, ctx: CompiscriptParser.RelationalExprContext):
+        n = len(ctx.additiveExpr())
+        if n == 1:
+            return ctx.additiveExpr(0).accept(self)
+        t0 = ctx.additiveExpr(0).accept(self)
+        for i in range(1, n):
+            ti = ctx.additiveExpr(i).accept(self)
+            if t0 != INTEGER or ti != INTEGER:
+                self._op_err(ctx, "relacional", f"{t0} y {ti}", "integer")
+        return BOOLEAN
+
+
+    # +, -
+    def visitAdditiveExpr(self, ctx: CompiscriptParser.AdditiveExprContext):
+        n = len(ctx.multiplicativeExpr())
+        if n == 1:
+            return ctx.multiplicativeExpr(0).accept(self)
+
+        res = ctx.multiplicativeExpr(0).accept(self)
+        for i in range(1, n):
+            t = ctx.multiplicativeExpr(i).accept(self)
+            # Si aparece string en una suma/resta:
+            if res == STRING or t == STRING:
+                # Permitimos concatenación si todos son string; si hay mezcla, error
+                if res != STRING or t != STRING:
+                    self._op_err(ctx, "+/-", f"{res} y {t}", "string o integer (coincidentes)")
+                res = STRING
+            else:
+                # aritmética entera
+                if res != INTEGER or t != INTEGER:
+                    self._op_err(ctx, "+/-", f"{res} y {t}", "integer")
+                res = INTEGER
+        return res
+
+
+    # *, /, %
+    def visitMultiplicativeExpr(self, ctx: CompiscriptParser.MultiplicativeExprContext):
+        n = len(ctx.unaryExpr())
+        if n == 1:
+            return ctx.unaryExpr(0).accept(self)
+        for i in range(n):
+            t = ctx.unaryExpr(i).accept(self)
+            if t != INTEGER:
+                self._op_err(ctx, "*,/,%", t, "integer")
+        return INTEGER
 
 def run_semantic(tree) -> ErrorCollect	or:
     errors = ErrorCollector()
