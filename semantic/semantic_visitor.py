@@ -88,9 +88,7 @@ class SymbolCollector(CompiscriptVisitor):
     # variableDeclaration: ('let'|'var') Identifier typeAnnotation? initializer? ';'
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
         name = _first_identifier_text(ctx)
-        decl_type = NULL
-        if ctx.typeAnnotation():
-            decl_type = self.visit(ctx.typeAnnotation())  # -> Type
+        decl_type = self.visit(ctx.typeAnnotation()) if ctx.typeAnnotation() else NULL
         sym = VariableSymbol(name=name, typ=decl_type, is_const=False, initialized=False)
         if not self.current.define(sym):
             self.errors.report(ctx.start.line, ctx.start.column, "E001", f"Redeclaración de '{name}'.")
@@ -99,13 +97,12 @@ class SymbolCollector(CompiscriptVisitor):
     # constantDeclaration: 'const' Identifier typeAnnotation? '=' expression ';'
     def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         name = _first_identifier_text(ctx)
-        decl_type = NULL
-        if ctx.typeAnnotation():
-            decl_type = self.visit(ctx.typeAnnotation())
+        decl_type = self.visit(ctx.typeAnnotation()) if ctx.typeAnnotation() else NULL
         sym = VariableSymbol(name=name, typ=decl_type, is_const=True, initialized=False)
         if not self.current.define(sym):
             self.errors.report(ctx.start.line, ctx.start.column, "E001", f"Redeclaración de '{name}'.")
         return None
+
 
     # typeAnnotation: ':' type;
     def visitTypeAnnotation(self, ctx: CompiscriptParser.TypeAnnotationContext):
@@ -174,6 +171,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.errors = errors
         self.current = root_scope
         self.scopes_by_ctx = scopes_by_ctx
+        self.func_ret_stack = []
 
     def _enter_by_ctx(self, ctx: ParserRuleContext):
         s = self.scopes_by_ctx.get(ctx)
@@ -190,35 +188,68 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
 
     def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
+        # Entrar al scope de la función (creado en Pass1)
         self._enter_by_ctx(ctx)
+
+        # Resolver el símbolo de la función en el scope padre para obtener el tipo de retorno
+        fname = ctx.Identifier().getText()
+        parent_scope = self.current.parent if self.current else None
+        fsym = parent_scope.resolve(fname) if parent_scope else None
+        expected_ret = fsym.typ.ret if fsym and hasattr(fsym, "typ") else NULL
+
+        self.func_ret_stack.append(expected_ret)
+        # Visitar cuerpo
         self.visit(ctx.block())
+        self.func_ret_stack.pop()
+
         self._exit()
         return None
+    
+    def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
+        expected = self.func_ret_stack[-1] if self.func_ret_stack else NULL
+        if ctx.expression():  # return expr;
+            actual = self.visit(ctx.expression())
+            if not self._is_assignable(actual, expected):
+                self.errors.report(ctx.start.line, ctx.start.column, "E012",
+                                f"Tipo de return '{actual}' no es asignable a '{expected}'.")
+        else:  # return;
+            if expected != NULL:
+                self.errors.report(ctx.start.line, ctx.start.column, "E013",
+                                f"Se esperaba 'return' con valor de tipo '{expected}'.")
+        return None
 
-    # variableDeclaration: validar initializer si existe
+
+    # variableDeclaration: ('let'|'var') Identifier typeAnnotation? initializer? ';'
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
         name = _first_identifier_text(ctx)
         sym = self.current.resolve(name)
         if ctx.initializer():
-            itype = self.visit(ctx.initializer())  # -> Type
-            if sym and not self._is_assignable(itype, sym.typ):
-                self.errors.report(ctx.start.line, ctx.start.column, "E004",
-                                   f"No se puede asignar '{itype}' a '{sym.typ}' en inicialización de '{name}'.")
-            if sym: sym.initialized = True
+            itype = self.visit(ctx.initializer())
+            if sym:
+                if sym.typ == NULL:  # sin anotación → inferimos
+                    sym.typ = itype
+                    sym.initialized = True
+                else:
+                    if not self._is_assignable(itype, sym.typ):
+                        self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                                        f"No se puede asignar '{itype}' a '{sym.typ}' en inicialización de '{name}'.")
+                    else:
+                        sym.initialized = True
         return None
 
     # constantDeclaration: const debe inicializarse y ser asignable
+    # constantDeclaration: 'const' Identifier typeAnnotation? '=' expression ';'
     def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         name = _first_identifier_text(ctx)
         sym = self.current.resolve(name)
-        if not ctx.expression():
-            self.errors.report(ctx.start.line, ctx.start.column, "E003", f"Constante '{name}' debe inicializarse.")
-            return None
-        itype = self.visit(ctx.expression())
-        if sym and not self._is_assignable(itype, sym.typ):
-            self.errors.report(ctx.start.line, ctx.start.column, "E004",
-                               f"No se puede asignar '{itype}' a '{sym.typ}' en const '{name}'.")
-        if sym: sym.initialized = True
+        itype = self.visit(ctx.expression())  # const SIEMPRE lleva init en tu gramática
+        if sym:
+            if sym.typ == NULL:
+                sym.typ = itype  # inferimos si no hubo anotación
+            elif not self._is_assignable(itype, sym.typ):
+                self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                                f"No se puede asignar '{itype}' a '{sym.typ}' en const '{name}'.")
+            sym.initialized = True
         return None
 
     # initializer: '=' expression
@@ -283,9 +314,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         return NULL
 
     # leftHandSide: primaryAtom (suffixOp)* ;
-    # Por ahora solo soportamos primaryAtom sin sufijos
     def visitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
-        return self.visit(ctx.primaryAtom())
+        t = self.visit(ctx.primaryAtom())
+        for s in ctx.suffixOp():
+            t = self._suffix_apply_by_token(s, t)
+        return t
+
+
+
 
     # primaryAtom:
     #   Identifier           # IdentifierExpr
@@ -307,6 +343,25 @@ class TypeCheckerVisitor(CompiscriptVisitor):
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         # Para ahora devolvemos NULL; luego lo ligamos al tipo de clase actual
         return NULL
+    
+    def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
+        et = self.visit(ctx.expression())
+        if not isinstance(et, ArrayType):
+            self.errors.report(ctx.start.line, ctx.start.column, "E032",
+                            "foreach espera un arreglo en 'in'.")
+            elem_t = NULL
+        else:
+            elem_t = et.elem
+
+        # Entrar al scope del bloque (creado en Pass1) y declarar el iterador
+        block = ctx.block()
+        self._enter_by_ctx(block)
+        name = ctx.Identifier().getText()
+        self.current.define(VariableSymbol(name=name, typ=elem_t, is_const=False, initialized=True))
+        self.visit(block)
+        self._exit()
+        return None
+
 
     # arrayLiteral: '[' (expression (',' expression)*)? ']'
     def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
@@ -426,6 +481,16 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             return True  # permitimos comparar con null
         return False
 
+    def _suffix_apply_by_token(self, sctx, base_type: Type) -> Type:
+        first = sctx.getChild(0).getText()  # '(', '[' o '.'
+        if first == '(':
+            return self._apply_call(sctx, base_type)
+        if first == '[':
+            return self._apply_index(sctx, base_type)
+        if first == '.':
+            return self._apply_prop(sctx, base_type)
+        return base_type
+    
     def _is_assignable(self, src: Type, dst: Type) -> bool:
         if src.name == dst.name: return True
         if src == NULL and (isinstance(dst, ArrayType) or isinstance(dst, ClassType)):
@@ -436,6 +501,68 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         msg = f"Tipos incompatibles para '{op}': {got}"
         if expected: msg += f" (se esperaba {expected})"
         self.errors.report(ctx.start.line, ctx.start.column, "E010", msg)
+
+    def _apply_suffix(self, sctx, base_type: Type) -> Type:
+        # Detecta por el primer token del sufijo: "(", "[" o "."
+        first = sctx.getChild(0).getText()
+        if first == '(':
+            # buscar ArgumentsContext si existe
+            args_ctx = None
+            for ch in sctx.getChildren():
+                if isinstance(ch, CompiscriptParser.ArgumentsContext):
+                    args_ctx = ch
+                    break
+            return self._apply_call(args_ctx, base_type)
+        if first == '[':
+            # estructura: '[' expression ']'
+            idx_expr_ctx = sctx.expression()
+            return self._apply_index(sctx, base_type, idx_expr_ctx)
+        if first == '.':
+            # estructura: '.' Identifier
+            # (stub por ahora; más adelante resolvemos campos/métodos de clases)
+            return self._apply_prop(sctx, base_type)
+        return base_type
+
+    def _apply_call(self, sctx: CompiscriptParser.CallExprContext, callee_type: Type) -> Type:
+        if not isinstance(callee_type, FunctionType):
+            if sctx.arguments():
+                for e in sctx.arguments().expression():
+                    self.visit(e)
+            self.errors.report(sctx.start.line, sctx.start.column, "E020",
+                            f"Llamada sobre no-función '{callee_type}'.")
+            return NULL
+
+        args = sctx.arguments().expression() if sctx.arguments() else []
+        if len(args) != len(callee_type.params):
+            self.errors.report(sctx.start.line, sctx.start.column, "E021",
+                            f"Aridad inválida: se esperaban {len(callee_type.params)} argumentos.")
+        else:
+            for i, e in enumerate(args):
+                actual = self.visit(e)
+                expected = callee_type.params[i]
+                if not self._is_assignable(actual, expected):
+                    self.errors.report(e.start.line, e.start.column, "E022",
+                                    f"Arg {i+1}: '{actual}' no asignable a '{expected}'.")
+        return callee_type.ret
+
+
+    def _apply_index(self, sctx: CompiscriptParser.IndexExprContext, base_type: Type) -> Type:
+        idx_t = self.visit(sctx.expression())
+        if idx_t != INTEGER:
+            self.errors.report(sctx.start.line, sctx.start.column, "E030", "Índice debe ser integer.")
+        if not isinstance(base_type, ArrayType):
+            self.errors.report(sctx.start.line, sctx.start.column, "E031",
+                            f"Indexación solo en arreglos, no en '{base_type}'.")
+            return NULL
+        return base_type.elem
+
+    def _apply_prop(self, ctx: CompiscriptParser.PropertyAccessExprContext, base_type: Type) -> Type:
+        # Por ahora no tenemos miembros de clase cargados; devolvemos NULL y avisamos
+        # (cuando implementemos tabla de miembros, aquí se resolverá el tipo real)
+        # Visit opcionalmente el nombre de la propiedad si lo necesitas (ctx.Identifier())
+        # Mantén esto “stub” para no bloquear pruebas de call()/index[]
+        return NULL
+
 
 
 # -----------------------------
