@@ -401,6 +401,40 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if t != INTEGER:
                 self._op_err(ctx, "*,/,%", t, "integer")
         return INTEGER
+    
+
+
+        # !  y  - (unario)
+    def visitUnaryExpr(self, ctx: CompiscriptParser.UnaryExprContext):
+        if ctx.getChildCount() == 2:
+            op = ctx.getChild(0).getText()
+            t  = ctx.getChild(1).accept(self)
+            if op == '!':
+                if t != BOOLEAN: self._op_err(ctx, "!", t, "boolean")
+                return BOOLEAN
+            if op == '-':
+                if t != INTEGER: self._op_err(ctx, "neg", t, "integer")
+                return INTEGER
+        return self.visitChildren(ctx)
+
+
+    # helpers
+    def _eq_compatible(self, a: Type, b: Type) -> bool:
+        if a.name == b.name: return True
+        if a == NULL or b == NULL:
+            return True  # permitimos comparar con null
+        return False
+
+    def _is_assignable(self, src: Type, dst: Type) -> bool:
+        if src.name == dst.name: return True
+        if src == NULL and (isinstance(dst, ArrayType) or isinstance(dst, ClassType)):
+            return True
+        return False
+
+    def _op_err(self, ctx: ParserRuleContext, op: str, got, expected: str=None):
+        msg = f"Tipos incompatibles para '{op}': {got}"
+        if expected: msg += f" (se esperaba {expected})"
+        self.errors.report(ctx.start.line, ctx.start.column, "E010", msg)
 
 def run_semantic(tree) -> ErrorCollect	or:
     errors = ErrorCollector()
