@@ -1,15 +1,10 @@
-from typing import Dict, List, Optional
+from typing import Optional, Dict
 from .symbols import Symbol
 
-class ScopeStack:
-    def __init__(self):
-        self.stack: List[Dict[str, Symbol]] = [ {} ]  # global
-
-    def push(self):
-        self.stack.append({})
-
-    def pop(self):
-        self.stack.pop()
+class Scope:
+    def __init__(self, parent: Optional["Scope"]=None):
+        self.parent = parent
+        self.symbols: Dict[str, Symbol] = {}
 
     def define(self, sym: Symbol) -> bool:
         if sym.name in self.symbols:
