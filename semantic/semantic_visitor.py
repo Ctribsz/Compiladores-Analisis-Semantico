@@ -12,6 +12,7 @@ from .scope import Scope
 from program.gen.CompiscriptVisitor import CompiscriptVisitor
 from program.gen.CompiscriptParser import CompiscriptParser
 
+
 # -----------------------------
 # Helpers de tipos
 # -----------------------------
@@ -46,6 +47,7 @@ def _first_identifier_text(ctx: ParserRuleContext) -> Optional[str]:
         if isinstance(ch, TerminalNode) and getattr(ch.symbol, "type", None) == CompiscriptParser.Identifier:
             return ch.getText()
     return None
+
 
 # =============================
 # PASS 1: Recolector de símbolos
@@ -401,10 +403,9 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if t != INTEGER:
                 self._op_err(ctx, "*,/,%", t, "integer")
         return INTEGER
-    
 
 
-        # !  y  - (unario)
+    # !  y  - (unario)
     def visitUnaryExpr(self, ctx: CompiscriptParser.UnaryExprContext):
         if ctx.getChildCount() == 2:
             op = ctx.getChild(0).getText()
@@ -436,7 +437,11 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         if expected: msg += f" (se esperaba {expected})"
         self.errors.report(ctx.start.line, ctx.start.column, "E010", msg)
 
-def run_semantic(tree) -> ErrorCollect	or:
+
+# -----------------------------
+# Orquestador
+# -----------------------------
+def run_semantic(tree) -> ErrorCollector:
     errors = ErrorCollector()
     p1 = SymbolCollector(errors); p1.visit(tree)
     p2 = TypeCheckerVisitor(errors, p1.global_scope, p1.scopes_by_ctx); p2.visit(tree)
