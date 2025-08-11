@@ -58,6 +58,7 @@ class SymbolCollector(CompiscriptVisitor):
         self.global_scope = Scope(None)
         self.current = self.global_scope
         self.scopes_by_ctx = {}
+        
 
     def _bind_scope(self, ctx: ParserRuleContext, scope: Scope):
         self.scopes_by_ctx[ctx] = scope
@@ -172,6 +173,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.current = root_scope
         self.scopes_by_ctx = scopes_by_ctx
         self.func_ret_stack = []
+        self.loop_depth = 0
 
     def _enter_by_ctx(self, ctx: ParserRuleContext):
         s = self.scopes_by_ctx.get(ctx)
@@ -204,9 +206,12 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
         self._exit()
         return None
-    
+    # prohibir return fuera de función
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
-        expected = self.func_ret_stack[-1] if self.func_ret_stack else NULL
+        if not self.func_ret_stack:
+            self.errors.report(ctx.start.line, ctx.start.column, "E014", "return fuera de función.")
+            return None
+        expected = self.func_ret_stack[-1]
         if ctx.expression():  # return expr;
             actual = self.visit(ctx.expression())
             if not self._is_assignable(actual, expected):
@@ -343,7 +348,8 @@ class TypeCheckerVisitor(CompiscriptVisitor):
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         # Para ahora devolvemos NULL; luego lo ligamos al tipo de clase actual
         return NULL
-    
+
+    # foreach (...) { ... }  
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
         et = self.visit(ctx.expression())
         if not isinstance(et, ArrayType):
@@ -352,13 +358,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             elem_t = NULL
         else:
             elem_t = et.elem
-
         # Entrar al scope del bloque (creado en Pass1) y declarar el iterador
         block = ctx.block()
         self._enter_by_ctx(block)
         name = ctx.Identifier().getText()
         self.current.define(VariableSymbol(name=name, typ=elem_t, is_const=False, initialized=True))
+        self.loop_depth += 1
         self.visit(block)
+        self.loop_depth -= 1
         self._exit()
         return None
 
@@ -562,8 +569,65 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         # Visit opcionalmente el nombre de la propiedad si lo necesitas (ctx.Identifier())
         # Mantén esto “stub” para no bloquear pruebas de call()/index[]
         return NULL
+    
+    # helper interno (añádelo en TypeCheckerVisitor)
+    def _expect_boolean(self, expr_ctx):
+        t = self.visit(expr_ctx)
+        if t != BOOLEAN:
+            self.errors.report(expr_ctx.start.line, expr_ctx.start.column, "E040",
+                            f"Condición debe ser boolean, no '{t}'.")
 
+    # if (bool) { ... } else { ... }
+    def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
+        self._expect_boolean(ctx.expression())
+        self.visit(ctx.block(0))
+        if ctx.block(1):
+            self.visit(ctx.block(1))
+        return None
 
+    # while (bool) { ... }
+    def visitWhileStatement(self, ctx: CompiscriptParser.WhileStatementContext):
+        self._expect_boolean(ctx.expression())
+        self.loop_depth += 1
+        self.visit(ctx.block())
+        self.loop_depth -= 1
+        return None
+    
+    # do { ... } while (bool);
+    def visitDoWhileStatement(self, ctx: CompiscriptParser.DoWhileStatementContext):
+        self.loop_depth += 1
+        self.visit(ctx.block())
+        self.loop_depth -= 1
+        self._expect_boolean(ctx.expression())
+        return None
+
+    # for (init; cond?; update?) { ... }
+    def visitForStatement(self, ctx: CompiscriptParser.ForStatementContext):
+        if ctx.variableDeclaration():
+            self.visit(ctx.variableDeclaration())
+        elif ctx.assignment():
+            self.visit(ctx.assignment())
+
+        exprs = ctx.expression()
+        if len(exprs) >= 1:
+            self._expect_boolean(exprs[0])   # la condición si existe
+        if len(exprs) == 2:
+            self.visit(exprs[1])             # update (solo visitarlo)
+
+        self.loop_depth += 1
+        self.visit(ctx.block())
+        self.loop_depth -= 1
+        return None
+    # break; y continue; solo dentro de loops
+    def visitBreakStatement(self, ctx: CompiscriptParser.BreakStatementContext):
+        if self.loop_depth == 0:
+            self.errors.report(ctx.start.line, ctx.start.column, "E041", "break fuera de bucle.")
+        return None
+
+    def visitContinueStatement(self, ctx: CompiscriptParser.ContinueStatementContext):
+        if self.loop_depth == 0:
+            self.errors.report(ctx.start.line, ctx.start.column, "E042", "continue fuera de bucle.")
+        return None
 
 # -----------------------------
 # Orquestador
