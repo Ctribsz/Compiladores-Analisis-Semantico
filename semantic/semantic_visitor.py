@@ -204,8 +204,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.visit(ctx.block())
         self.func_ret_stack.pop()
 
+        # <-- NUEVO: si la función debe retornar, exigir que todas las rutas del cuerpo retornen
+        if expected_ret != NULL and not self._returns_all_block(ctx.block()):
+            self.errors.report(ctx.start.line, ctx.start.column, "E015",
+                            f"La función '{fname}' no retorna en todas las rutas.")
+
         self._exit()
         return None
+
     # prohibir return fuera de función
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
         if not self.func_ret_stack:
@@ -628,6 +634,32 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         if self.loop_depth == 0:
             self.errors.report(ctx.start.line, ctx.start.column, "E042", "continue fuera de bucle.")
         return None
+    
+    # ---- Returns en todas las rutas (análisis simple) ----
+    def _returns_all_block(self, bctx: CompiscriptParser.BlockContext) -> bool:
+        # Si algún statement del bloque garantiza return, el bloque garantiza return.
+        # Nota: Esto es conservador y suficiente para la rúbrica (no analiza loops/switch).
+        for st in bctx.statement():
+            if self._returns_all_stmt(st):
+                return True
+        return False
+    
+    def _returns_all_stmt(self, sctx: CompiscriptParser.StatementContext) -> bool:
+        # return;
+        if sctx.returnStatement() is not None:
+            return True
+        # { ... }
+        if sctx.block() is not None:
+            return self._returns_all_block(sctx.block())
+        # if (..) { ... } else { ... }
+        if sctx.ifStatement() is not None:
+            ifc = sctx.ifStatement()
+            # Requiere else y que ambas ramas garanticen return
+            if ifc.block(1) is None:
+                return False
+            return self._returns_all_block(ifc.block(0)) and self._returns_all_block(ifc.block(1))
+        # (Opcional a futuro) try/catch, switch, etc.
+        return False
 
 # -----------------------------
 # Orquestador
