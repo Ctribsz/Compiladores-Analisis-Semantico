@@ -21,7 +21,7 @@ def _base_type_from_text(t: str) -> Type:
     if t == "integer": return INTEGER
     if t == "string":  return STRING
     if t == "boolean": return BOOLEAN
-    if t == "null":    return NULL
+    if t in ("null", "void"): return NULL
     return ClassType(t)
 
 def _type_from_rule_text(text: str) -> Type:
@@ -190,7 +190,9 @@ class SymbolCollector(CompiscriptVisitor):
                 params_syms = self.visit(fctx.parameters()) if fctx.parameters() else []
                 ret_type = self.visit(fctx.type_()) if fctx.type_() else NULL
                 ftype = FunctionType(params=[p.typ for p in params_syms], ret=ret_type)
-
+                
+                # marca el contexto del método con su clase
+                setattr(fctx, "_enclosing_class", cname)
                 fsym = FunctionSymbol(name=fname, typ=ftype, params=params_syms)
                 if not self.current.define(fsym):
                     self.errors.report(fctx.start.line, fctx.start.column, "E001", f"Redeclaración de función '{fname}'.")
@@ -220,6 +222,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.scopes_by_ctx = scopes_by_ctx
         self.func_ret_stack = []
         self.loop_depth = 0
+        self.current_class_stack = []  # nombre de clase actual si estamos dentro de un método
 
     def _enter_by_ctx(self, ctx: ParserRuleContext):
         s = self.scopes_by_ctx.get(ctx)
@@ -245,18 +248,38 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         fsym = parent_scope.resolve(fname) if parent_scope else None
         expected_ret = fsym.typ.ret if fsym and hasattr(fsym, "typ") else NULL
 
+        # --- detectar si estamos dentro de una clase ---
+        enclosing_class_name = getattr(ctx, "_enclosing_class", None)
+        if enclosing_class_name:
+            # estamos en un método: habilitar 'this'
+            self.current_class_stack.append(enclosing_class_name)
+            # define 'this' en el scope del método (si no existe)
+            try:
+                self.current.define(VariableSymbol(
+                    name="this",
+                    typ=ClassType(enclosing_class_name),
+                    is_const=False,
+                    initialized=True
+                ))
+            except Exception:
+                pass
+
         self.func_ret_stack.append(expected_ret)
         # Visitar cuerpo
         self.visit(ctx.block())
         self.func_ret_stack.pop()
 
-        # <-- NUEVO: si la función debe retornar, exigir que todas las rutas del cuerpo retornen
+        # todas las rutas retornan (solo si se espera valor)
         if expected_ret != NULL and not self._returns_all_block(ctx.block()):
             self.errors.report(ctx.start.line, ctx.start.column, "E015",
                             f"La función '{fname}' no retorna en todas las rutas.")
 
+        if enclosing_class_name:
+            self.current_class_stack.pop()
+
         self._exit()
         return None
+
 
     # prohibir return fuera de función
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
@@ -399,12 +422,46 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         cname = ctx.Identifier().getText()
-        # En el futuro: validar existencia de la clase y constructor
+        csym = self._resolve_class_symbol(cname)
+        args = ctx.arguments().expression() if ctx.arguments() else []
+
+        if not csym:
+            # clase no declarada
+            for e in args: self.visit(e)  # igual tipamos args para propagar
+            self.errors.report(ctx.start.line, ctx.start.column, "E037", f"Clase '{cname}' no declarada.")
+            return ClassType(cname)  # devolvemos el tipo para no cascada de errores
+
+        ctor = csym.methods.get("constructor")
+        if not ctor:
+            # sin constructor declarado: solo 0 argumentos
+            if len(args) != 0:
+                self.errors.report(ctx.start.line, ctx.start.column, "E021",
+                                f"Aridad inválida en constructor de '{cname}': se esperaban 0 argumentos.")
+            else:
+                # nada que validar
+                pass
+            return ClassType(cname)
+
+        # validar aridad
+        if len(args) != len(ctor.params):
+            self.errors.report(ctx.start.line, ctx.start.column, "E021",
+                            f"Aridad inválida en constructor de '{cname}': se esperaban {len(ctor.params)} argumentos.")
+        else:
+            for i, e in enumerate(args):
+                actual = self.visit(e)
+                expected = ctor.params[i]
+                if not self._is_assignable(actual, expected):
+                    self.errors.report(e.start.line, e.start.column, "E022",
+                                    f"Arg {i+1} en constructor de '{cname}': '{actual}' no asignable a '{expected}'.")
         return ClassType(cname)
 
+
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
-        # Para ahora devolvemos NULL; luego lo ligamos al tipo de clase actual
-        return NULL
+        if not self.current_class_stack:
+            self.errors.report(ctx.start.line, ctx.start.column, "E043", "this no puede usarse fuera de un método de clase.")
+            return NULL
+        return ClassType(self.current_class_stack[-1])
+
 
     # foreach (...) { ... }  
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
