@@ -58,6 +58,7 @@ class SymbolCollector(CompiscriptVisitor):
         self.global_scope = Scope(None)
         self.current = self.global_scope
         self.scopes_by_ctx = {}
+        self.classes = {}  # nombre -> ClassSymbol
         
 
     def _bind_scope(self, ctx: ParserRuleContext, scope: Scope):
@@ -74,10 +75,12 @@ class SymbolCollector(CompiscriptVisitor):
             self.current = self.current.parent
 
     # program: statement* EOF;
-    def visitProgram(self, ctx: CompiscriptParser.ProgramContext):
-        # enlazamos el scope global al program para que Pass2 pueda entrar
+    def visitProgram(self, ctx):
         self._bind_scope(ctx, self.global_scope)
-        return self.visitChildren(ctx)
+        r = self.visitChildren(ctx)
+        self._finalize_inheritance()   
+        return r
+
 
     # block: '{' statement* '}';
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
@@ -155,6 +158,16 @@ class SymbolCollector(CompiscriptVisitor):
     def visitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
         cname = _first_identifier_text(ctx)
         csym = ClassSymbol(name=cname, typ=ClassType(cname), fields={}, methods={})
+        # guarda para herencia
+        self.classes[cname] = csym
+        setattr(csym, "_ctx", ctx)  # para line/col en errores
+
+        # base (opcional): grammar: class Identifier (':' Identifier)?
+        if ctx.Identifier(1):
+            csym.base_name = ctx.Identifier(1).getText()
+        else:
+            csym.base_name = None
+        csym.base = None  # se vincula en la fase de resolución
         if not self.current.define(csym):
             self.errors.report(ctx.start.line, ctx.start.column, "E001", f"Redeclaración de clase '{cname}'.")
 
@@ -210,7 +223,92 @@ class SymbolCollector(CompiscriptVisitor):
         self._exit_scope()
         return None
 
+    def _finalize_inheritance(self):
+        # dfs para resolver base, detectar ciclos y fusionar miembros
+        VIS_NEW, VIS_RUN, VIS_DONE = 0, 1, 2
+        for cs in self.classes.values():
+            setattr(cs, "_vis", VIS_NEW)
 
+        def same_sig(a, b):
+            from .types import FunctionType
+            if not isinstance(a, FunctionType) or not isinstance(b, FunctionType):
+                return False
+            if len(a.params) != len(b.params): return False
+            for i in range(len(a.params)):
+                if a.params[i].name != b.params[i].name:
+                    return False
+            return a.ret.name == b.ret.name
+
+        def merge(derived, base):
+            # Métodos: heredar; permitir override compatible; NO heredar 'constructor'
+            for mname, mt in base.methods.items():
+                if mname == "constructor":
+                    continue
+                if mname in derived.methods:
+                    dt = derived.methods[mname]
+                    if not same_sig(dt, mt):
+                        ctx = getattr(derived, "_ctx", None)
+                        line = ctx.start.line if ctx else 0
+                        col  = ctx.start.column if ctx else 0
+                        self.errors.report(line, col, "E053",
+                            f"Override incompatible de método '{mname}' en '{derived.name}'.")
+                    # si es compatible, se queda el de la derivada
+                else:
+                    derived.methods[mname] = mt
+            # Campos: conflicto si el derivado redeclara un campo de la base
+            for fname, ft in base.fields.items():
+                if fname in derived.fields:
+                    ctx = getattr(derived, "_ctx", None)
+                    line = ctx.start.line if ctx else 0
+                    col  = ctx.start.column if ctx else 0
+                    self.errors.report(line, col, "E054",
+                        f"Campo '{fname}' en '{derived.name}' ya existe en la base '{base.name}'.")
+                    # se mantiene el del derivado
+                else:
+                    derived.fields[fname] = ft
+
+        def dfs(csym):
+            vis = getattr(csym, "_vis", 0)
+            if vis == VIS_RUN:
+                ctx = getattr(csym, "_ctx", None)
+                line = ctx.start.line if ctx else 0
+                col  = ctx.start.column if ctx else 0
+                self.errors.report(line, col, "E052",
+                    f"Herencia cíclica detectada en '{csym.name}'.")
+                csym.base = None
+                csym.base_name = None
+                setattr(csym, "_vis", VIS_DONE)
+                return
+            if vis == VIS_DONE:
+                return
+
+            setattr(csym, "_vis", VIS_RUN)
+
+            if getattr(csym, "base_name", None):
+                bname = csym.base_name
+                base = self.classes.get(bname)
+                if not base:
+                    ctx = getattr(csym, "_ctx", None)
+                    line = ctx.start.line if ctx else 0
+                    col  = ctx.start.column if ctx else 0
+                    self.errors.report(line, col, "E051",
+                        f"Clase base '{bname}' no encontrada para '{csym.name}'.")
+                    csym.base = None
+                    csym.base_name = None
+                else:
+                    dfs(base)
+                    csym.base = base
+                    merge(csym, base)
+
+            setattr(csym, "_vis", VIS_DONE)
+
+        for cs in self.classes.values():
+            if getattr(cs, "_vis", 0) == VIS_NEW:
+                dfs(cs)
+
+        # cleanup flags
+        for cs in self.classes.values():
+            if hasattr(cs, "_vis"): delattr(cs, "_vis")
 
 # =============================
 # PASS 2: Chequeo de tipos/uso
@@ -232,8 +330,13 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         if self.current.parent: self.current = self.current.parent
 
     # program / block / function: moverse por scopes ya construidos
-    def visitProgram(self, ctx: CompiscriptParser.ProgramContext):
-        self._enter_by_ctx(ctx); r = self.visitChildren(ctx); return r
+    def visitProgram(self, ctx):
+        self._enter_by_ctx(ctx)
+        r = self.visitChildren(ctx)
+        self._exit()
+        return r
+
+
 
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
@@ -789,7 +892,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.errors.report(err_ctx.start.line, err_ctx.start.column, "E034",
                         f"Propiedad o método '{prop}' no existe en '{obj_type.name}'.")
         return NULL
-
+    
 
 # -----------------------------
 # Orquestador
