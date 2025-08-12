@@ -4,8 +4,6 @@ from gen.CompiscriptLexer import CompiscriptLexer
 from gen.CompiscriptParser import CompiscriptParser
 from antlr4.error.ErrorListener import ErrorListener
 
-
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # --- Listener para errores sintácticos bonitos

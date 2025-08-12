@@ -12,7 +12,6 @@ from .scope import Scope
 from program.gen.CompiscriptVisitor import CompiscriptVisitor
 from program.gen.CompiscriptParser import CompiscriptParser
 
-
 # -----------------------------
 # Helpers de tipos
 # -----------------------------
@@ -48,7 +47,6 @@ def _first_identifier_text(ctx: ParserRuleContext) -> Optional[str]:
             return ch.getText()
     return None
 
-
 # =============================
 # PASS 1: Recolector de símbolos
 # =============================
@@ -59,7 +57,6 @@ class SymbolCollector(CompiscriptVisitor):
         self.current = self.global_scope
         self.scopes_by_ctx = {}
         self.classes = {}  # nombre -> ClassSymbol
-        
 
     def _bind_scope(self, ctx: ParserRuleContext, scope: Scope):
         self.scopes_by_ctx[ctx] = scope
@@ -80,7 +77,6 @@ class SymbolCollector(CompiscriptVisitor):
         r = self.visitChildren(ctx)
         self._finalize_inheritance()   
         return r
-
 
     # block: '{' statement* '}';
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
@@ -106,7 +102,6 @@ class SymbolCollector(CompiscriptVisitor):
         if not self.current.define(sym):
             self.errors.report(ctx.start.line, ctx.start.column, "E001", f"Redeclaración de '{name}'.")
         return None
-
 
     # typeAnnotation: ':' type;
     def visitTypeAnnotation(self, ctx: CompiscriptParser.TypeAnnotationContext):
@@ -336,7 +331,41 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self._exit()
         return r
 
+    def visitTernaryExpr(self, ctx: CompiscriptParser.TernaryExprContext):
+        """
+        conditionalExpr:
+            logicalOrExpr ('?' expression ':' expression)?  # TernaryExpr
+        """
+        cond_t = ctx.logicalOrExpr().accept(self)
 
+        # Si no hay '?', el valor es el de logicalOrExpr
+        if len(ctx.expression()) == 0:
+            return cond_t
+
+        # Con ternario: validar condición y calcular tipo común
+        if cond_t != BOOLEAN:
+            self.errors.report(ctx.start.line, ctx.start.column, "E040",
+                            f"Condición debe ser boolean, no '{cond_t}'.")
+
+        t_then = self.visit(ctx.expression(0))
+        t_else = self.visit(ctx.expression(1))
+
+        # Regla de "tipo común": si uno es asignable al otro, el resultado es el más específico.
+        if self._is_assignable(t_then, t_else):
+            return t_else
+        if self._is_assignable(t_else, t_then):
+            return t_then
+
+        # Soporte extra: permitir NULL hacia ref/array/función (si no lo cubre _is_assignable)
+        if t_then == NULL and t_else != NULL:
+            return t_else
+        if t_else == NULL and t_then != NULL:
+            return t_then
+
+        # Incompatible
+        self.errors.report(ctx.start.line, ctx.start.column, "E070",
+                        f"Ramas incompatibles en ternario: '{t_then}' vs '{t_else}'.")
+        return NULL
 
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
@@ -383,7 +412,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self._exit()
         return None
 
-
     # prohibir return fuera de función
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
         if not self.func_ret_stack:
@@ -400,7 +428,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 self.errors.report(ctx.start.line, ctx.start.column, "E013",
                                 f"Se esperaba 'return' con valor de tipo '{expected}'.")
         return None
-
 
     # variableDeclaration: ('let'|'var') Identifier typeAnnotation? initializer? ';'
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
@@ -477,7 +504,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                                 f"No se puede asignar '{rhs_t}' a '{prop_t}'.")
             return prop_t
 
-
     # expressionStatement: expression ';'
     def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
         self.visit(ctx.expression()); return None
@@ -497,8 +523,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
     # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
     def visitPrimaryExpr(self, ctx: CompiscriptParser.PrimaryExprContext):
-        for ch in ctx.getChildren():
-            return ch.accept(self)
+        # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
+        if ctx.literalExpr() is not None:
+            return self.visit(ctx.literalExpr())
+        if ctx.leftHandSide() is not None:
+            return self.visit(ctx.leftHandSide())
+        if ctx.expression() is not None:
+            # caso paréntesis: devolver el tipo de la expresión interna
+            return self.visit(ctx.expression())
         return NULL
 
     # leftHandSide: primaryAtom (suffixOp)* ;
@@ -507,9 +539,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         for s in ctx.suffixOp():
             t = self._suffix_apply_by_token(s, t)
         return t
-
-
-
 
     # primaryAtom:
     #   Identifier           # IdentifierExpr
@@ -565,7 +594,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             return NULL
         return ClassType(self.current_class_stack[-1])
 
-
     # foreach (...) { ... }  
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
         et = self.visit(ctx.expression())
@@ -585,7 +613,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.loop_depth -= 1
         self._exit()
         return None
-
 
     # arrayLiteral: '[' (expression (',' expression)*)? ']'
     def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
@@ -611,7 +638,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 self._op_err(ctx, "||", t, "boolean")
         return BOOLEAN
 
-
     def visitLogicalAndExpr(self, ctx: CompiscriptParser.LogicalAndExprContext):
         n = len(ctx.equalityExpr())
         if n == 1:
@@ -621,7 +647,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if t != BOOLEAN:
                 self._op_err(ctx, "&&", t, "boolean")
         return BOOLEAN
-
 
     # ==, !=
     def visitEqualityExpr(self, ctx: CompiscriptParser.EqualityExprContext):
@@ -635,7 +660,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 self._op_err(ctx, "==/!=", f"{left} vs {right}")
         return BOOLEAN
 
-
     # <,<=,>,>=  (integer)
     def visitRelationalExpr(self, ctx: CompiscriptParser.RelationalExprContext):
         n = len(ctx.additiveExpr())
@@ -647,7 +671,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if t0 != INTEGER or ti != INTEGER:
                 self._op_err(ctx, "relacional", f"{t0} y {ti}", "integer")
         return BOOLEAN
-
 
     # +, -
     def visitAdditiveExpr(self, ctx: CompiscriptParser.AdditiveExprContext):
@@ -671,7 +694,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 res = INTEGER
         return res
 
-
     # *, /, %
     def visitMultiplicativeExpr(self, ctx: CompiscriptParser.MultiplicativeExprContext):
         n = len(ctx.unaryExpr())
@@ -682,7 +704,6 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if t != INTEGER:
                 self._op_err(ctx, "*,/,%", t, "integer")
         return INTEGER
-
 
     # !  y  - (unario)
     def visitUnaryExpr(self, ctx: CompiscriptParser.UnaryExprContext):
@@ -697,6 +718,39 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 return INTEGER
         return self.visitChildren(ctx)
 
+    def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
+        # Tipo del switch(expr)
+        switch_t = self.visit(ctx.expression())
+
+        # Conjunto para detectar duplicados de 'case' literales
+        seen = {}
+
+        # Validar cada case: tipo compatible y duplicados, luego visitar statements
+        for c in ctx.switchCase():
+            ce_t = self.visit(c.expression())
+
+            if not self._is_case_compatible(ce_t, switch_t):
+                self.errors.report(c.start.line, c.start.column, "E060",
+                                f"Case incompatible con switch: '{ce_t}' vs '{switch_t}'.")
+
+            k = self._case_value_key(c.expression())
+            if k is not None:
+                if k in seen:
+                    self.errors.report(c.start.line, c.start.column, "E061",
+                                    f"Case duplicado: {c.expression().getText()}.")
+                else:
+                    seen[k] = (c.start.line, c.start.column)
+
+            # Visitar statements del case
+            for st in c.statement():
+                self.visit(st)
+
+        # default (si lo hay)
+        if ctx.defaultCase():
+            for st in ctx.defaultCase().statement():
+                self.visit(st)
+
+        return None
 
     # helpers
     def _eq_compatible(self, a: Type, b: Type) -> bool:
@@ -892,8 +946,32 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.errors.report(err_ctx.start.line, err_ctx.start.column, "E034",
                         f"Propiedad o método '{prop}' no existe en '{obj_type.name}'.")
         return NULL
-    
+        
+    def _is_case_compatible(self, case_t: Type, switch_t: Type) -> bool:
+        # Compatible si hay asignabilidad en algún sentido (p.ej., mismos primitivos, o NULL ↔ clase/array)
+        return self._is_assignable(case_t, switch_t) or self._is_assignable(switch_t, case_t)
 
+    def _case_value_key(self, expr_ctx) -> Optional[tuple]:
+        """
+        Retorna una clave hashable para detectar 'case' duplicados
+        SOLO si el case es un literal simple: int, string, boolean.
+        Si no, retorna None (no intentamos evaluar expresiones).
+        """
+        txt = expr_ctx.getText()
+        # boolean
+        if txt == "true":  return ("bool", True)
+        if txt == "false": return ("bool", False)
+        # string
+        if (len(txt) >= 2 and ((txt[0] == '"' and txt[-1] == '"') or (txt[0] == "'" and txt[-1] == "'"))):
+            return ("str", txt[1:-1])
+        # integer (permite signo)
+        core = txt[1:] if txt.startswith("-") else txt
+        if core.isdigit():
+            try:
+                return ("int", int(txt))
+            except Exception:
+                return None
+        return None
 # -----------------------------
 # Orquestador
 # -----------------------------
