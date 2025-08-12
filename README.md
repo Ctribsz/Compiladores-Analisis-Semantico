@@ -182,7 +182,43 @@ Puedes correr uno a uno:
 python program/Driver.py tests/valid/ternary/01_ok.cps
 python program/Driver.py tests/invalid/switch/02_duplicate_case.cps
 ```
-    
+Criterio:
+
+    En valid no debe aparecer salida.
+
+    En invalid debe aparecer al menos un [E###].
+
+6) Flujo interno (cómo funciona)
+
+    Lexer/Parser (ANTLR): CompiscriptLexer tokeniza y CompiscriptParser construye el árbol (program()).
+
+    Pass 1 – SymbolCollector:
+
+        Crea la tabla de símbolos (stack de Scopes) y la asocia a nodos (ctx.scope).
+
+        Declara variables/const/funciones/clases.
+
+        En clases recolecta miembros y resuelve herencia (merge de miembros y validaciones).
+
+    Pass 2 – TypeCheckerVisitor:
+
+        Entra a los scopes guardados y resuelve nombres.
+
+        Tipa expresiones y valida reglas semánticas (ver lista de arriba).
+
+    Driver:
+
+        Si hay errores, los imprime (uno por línea). Si no hay → silencio.
+
+7) Tips y problemas comunes
+
+    Si ves errores tipo “None” en condiciones, verifica visitPrimaryExpr: el caso '(' expression ')' debe visitar la expression, no el token '('.
+
+    Si new C(...) no valida el constructor, revisa que el método se llame constructor exactamente.
+
+    Si this marca E043 dentro de un método, asegúrate de que en Pass 1 se etiquete el contexto del método con su clase (se hace en visitClassDeclaration) y que en Pass 2 se empuje esa clase al stack current_class_stack.
+
+
 
 ## 🧩 Características del Lenguaje
 
