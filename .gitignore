@@ -1,2 +1,4 @@
 configs
 program/__pycache__
+program/gen/
+semantic/__pycache__
