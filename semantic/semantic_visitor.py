@@ -157,11 +157,57 @@ class SymbolCollector(CompiscriptVisitor):
         csym = ClassSymbol(name=cname, typ=ClassType(cname), fields={}, methods={})
         if not self.current.define(csym):
             self.errors.report(ctx.start.line, ctx.start.column, "E001", f"Redeclaración de clase '{cname}'.")
-        # (Opcional) scope de clase; por ahora solo recorremos miembros
+
+        # scope de clase
         self._enter_child_scope(ctx)
-        self.visitChildren(ctx)
+
+        # Recorremos miembros explícitamente para poblar fields/methods en ClassSymbol
+        for cm in ctx.classMember():
+            if cm.variableDeclaration() is not None:
+                vctx = cm.variableDeclaration()
+                vname = _first_identifier_text(vctx)
+                vtype = self.visit(vctx.typeAnnotation()) if vctx.typeAnnotation() else NULL
+                # Declarar símbolo de campo en scope de clase (opcional, útil para 'this' más adelante)
+                vsym = VariableSymbol(name=vname, typ=vtype, is_const=False, initialized=False)
+                if not self.current.define(vsym):
+                    self.errors.report(vctx.start.line, vctx.start.column, "E001", f"Redeclaración de '{vname}'.")
+                # Registrar en la clase
+                csym.fields[vname] = vtype
+
+            elif cm.constantDeclaration() is not None:
+                cctx = cm.constantDeclaration()
+                vname = _first_identifier_text(cctx)
+                vtype = self.visit(cctx.typeAnnotation()) if cctx.typeAnnotation() else NULL
+                vsym = VariableSymbol(name=vname, typ=vtype, is_const=True, initialized=False)
+                if not self.current.define(vsym):
+                    self.errors.report(cctx.start.line, cctx.start.column, "E001", f"Redeclaración de '{vname}'.")
+                csym.fields[vname] = vtype  # (si luego quieres distinguir const, puedes guardar flags aparte)
+
+            elif cm.functionDeclaration() is not None:
+                fctx = cm.functionDeclaration()
+                fname = _first_identifier_text(fctx)
+                # Armar FunctionType para el método
+                params_syms = self.visit(fctx.parameters()) if fctx.parameters() else []
+                ret_type = self.visit(fctx.type_()) if fctx.type_() else NULL
+                ftype = FunctionType(params=[p.typ for p in params_syms], ret=ret_type)
+
+                fsym = FunctionSymbol(name=fname, typ=ftype, params=params_syms)
+                if not self.current.define(fsym):
+                    self.errors.report(fctx.start.line, fctx.start.column, "E001", f"Redeclaración de función '{fname}'.")
+                # Definir parámetros en scope del método y visitar el cuerpo
+                self._enter_child_scope(fctx)
+                for p in params_syms:
+                    if not self.current.define(p):
+                        self.errors.report(fctx.start.line, fctx.start.column, "E001", f"Parámetro duplicado '{p.name}'.")
+                self.visit(fctx.block())
+                self._exit_scope()
+
+                # Registrar en la clase
+                csym.methods[fname] = ftype
+
         self._exit_scope()
         return None
+
 
 
 # =============================
@@ -294,12 +340,17 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 sym.initialized = True
             return sym.typ
         else:
-            # property assignment aún no implementado
-            self.errors.report(ctx.start.line, ctx.start.column, "E006",
-                               "Asignación a propiedad no soportada aún.")
-            # visitar RHS para seguir tipeando
-            self.visit(ctx.expression(1))
-            return NULL
+            # assignment: expression '.' Identifier '=' expression ';'
+            obj_t = self.visit(ctx.expression(0))           # tipo del objeto
+            # nombre de la propiedad: el tercer hijo es el Identifier en esta regla
+            prop_name = ctx.getChild(2).getText()
+            prop_t = self._resolve_property_type(obj_t, prop_name, ctx)
+            rhs_t = self.visit(ctx.expression(1))
+            if not self._is_assignable(rhs_t, prop_t):
+                self.errors.report(ctx.start.line, ctx.start.column, "E004",
+                                f"No se puede asignar '{rhs_t}' a '{prop_t}'.")
+            return prop_t
+
 
     # expressionStatement: expression ';'
     def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
@@ -569,12 +620,10 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             return NULL
         return base_type.elem
 
-    def _apply_prop(self, ctx: CompiscriptParser.PropertyAccessExprContext, base_type: Type) -> Type:
-        # Por ahora no tenemos miembros de clase cargados; devolvemos NULL y avisamos
-        # (cuando implementemos tabla de miembros, aquí se resolverá el tipo real)
-        # Visit opcionalmente el nombre de la propiedad si lo necesitas (ctx.Identifier())
-        # Mantén esto “stub” para no bloquear pruebas de call()/index[]
-        return NULL
+    def _apply_prop(self, sctx: CompiscriptParser.PropertyAccessExprContext, base_type: Type) -> Type:
+        prop = sctx.Identifier().getText()
+        return self._resolve_property_type(base_type, prop, sctx)
+
     
     # helper interno (añádelo en TypeCheckerVisitor)
     def _expect_boolean(self, expr_ctx):
@@ -660,6 +709,30 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             return self._returns_all_block(ifc.block(0)) and self._returns_all_block(ifc.block(1))
         # (Opcional a futuro) try/catch, switch, etc.
         return False
+
+    def _resolve_class_symbol(self, cname: str) -> Optional[ClassSymbol]:
+        # Desde el scope actual, resolve hasta encontrar la clase en scopes superiores
+        sym = self.current.resolve(cname)
+        return sym if isinstance(sym, ClassSymbol) else None
+
+    def _resolve_property_type(self, obj_type: Type, prop: str, err_ctx) -> Type:
+        if not isinstance(obj_type, ClassType):
+            self.errors.report(err_ctx.start.line, err_ctx.start.column, "E033",
+                            f"Acceso a propiedad sobre no-objeto '{obj_type}'.")
+            return NULL
+        csym = self._resolve_class_symbol(obj_type.name)
+        if not csym:
+            self.errors.report(err_ctx.start.line, err_ctx.start.column, "E033",
+                            f"Clase '{obj_type.name}' no encontrada para acceso a propiedad.")
+            return NULL
+        if prop in csym.fields:
+            return csym.fields[prop]
+        if prop in csym.methods:
+            return csym.methods[prop]  # FunctionType
+        self.errors.report(err_ctx.start.line, err_ctx.start.column, "E034",
+                        f"Propiedad o método '{prop}' no existe en '{obj_type.name}'.")
+        return NULL
+
 
 # -----------------------------
 # Orquestador
