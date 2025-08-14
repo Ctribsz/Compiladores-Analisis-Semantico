@@ -1,7 +1,7 @@
 import sys, os
 from antlr4 import FileStream, CommonTokenStream
-from gen.CompiscriptLexer import CompiscriptLexer
-from gen.CompiscriptParser import CompiscriptParser
+from program.gen.CompiscriptLexer import CompiscriptLexer
+from program.gen.CompiscriptParser import CompiscriptParser
 from antlr4.error.ErrorListener import ErrorListener
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

@@ -1,465 +1,244 @@
-# Compiscript – Fase M1: Análisis Semántico (Python + ANTLR4)
-Este repo contiene un front-end parcial de Compiscript (subset de TypeScript):
-lexer/parser generados con ANTLR4 y un analizador semántico en Python organizado en dos pases:
+# Compiscript – M1: Análisis Semántico (Python + ANTLR4)
 
-    Pass 1 – SymbolCollector: construye tabla de símbolos y ámbitos (scopes).
+Front-end parcial para **Compiscript** (subset de TypeScript).
+Incluye **lexer/parser** generados con ANTLR4, **análisis semántico** en Python (dos pases) y un **IDE web** minimal (FastAPI + Monaco) que muestra errores en el editor.
 
-    Pass 2 – TypeCheckerVisitor: valida tipos, usos y reglas semánticas.
+**Comportamiento esperado del analizador**
 
-El comportamiento esperado es:
+* Si el `.cps` está correcto → **no imprime nada** (exit code `0`).
+* Si hay errores → imprime líneas tipo:
 
-    Si el archivo .cps no tiene errores → no imprime nada.
+  ```
+  [E004] (12:3) No se puede asignar 'string' a 'integer'.
+  ```
 
-    Si hay errores → se imprimen con el formato [E###] (línea:col) mensaje.
+  y retorna `exit code != 0`.
 
-1) Generar lexer/parser de ANTLR
+---
 
-La gramática vive en program/Compiscript.g4.
-Compila así (desde la raíz del repo):
+## Requisitos
+
+* Python 3.10+ (recomendado 3.11).
+* Java 8+ (para ejecutar el JAR de ANTLR).
+* Paquetes Python:
+
+  ```
+  pip install -r requirements.txt
+  ```
+
+  (incluye `antlr4-python3-runtime`, `fastapi`, `uvicorn`, `pytest` si lo agregas).
+
+---
+
+## 1) Generar lexer/parser con ANTLR
+
+La gramática está en `program/Compiscript.g4`. Desde la **raíz** del repo:
+
 ```bash
-java -jar antlr-4.13.1-complete.jar -Dlanguage=Python3 -visitor -o program/gen program/Compiscript.g4
+java -jar antlr-4.13.1-complete.jar -Dlanguage=Python3 -visitor \
+  -o program/gen -Xexact-output-dir program/Compiscript.g4
 ```
-Esto crea en program/gen/ los archivos generados (lexer, parser y visitor).
 
-    No edites nada dentro de program/gen/ a mano.
+Esto crea en `program/gen/`:
 
-Cada vez que cambies Compiscript.g4, vuelve a correr el comando.
-2) Ejecutar el analizador sobre un archivo .cps
+```
+CompiscriptLexer.py  CompiscriptParser.py  CompiscriptVisitor.py  (y .interp/.tokens)
+```
 
-Hay un Driver.py de prueba rápida:
+> No edites nada dentro de `program/gen/`. Si cambias la gramática, vuelve a ejecutar el comando.
+
+---
+
+## 2) Ejecutar el analizador sobre un archivo
+
 ```bash
-python program/Driver.py program/program.cps
+python -m program.Driver program/program.cps
 ```
-    OK: no imprime nada.
 
-    Error: se listan errores con código y ubicación.
+* Si no hay errores → no imprime nada.
+* Si hay errores → imprime `[EXXX] (línea:col) mensaje` y retorna `!= 0`.
 
-3) Estructura del proyecto
+> Consejo: ejecuta siempre desde la **raíz** del repo para que los imports funcionen.
+
+---
+
+## 3) IDE web (FastAPI + Monaco)
+
+Estructura:
+
+```
+ide/
+├── server.py          # endpoint /analyze + estáticos
+└── static/
+    ├── index.html     # UI del editor
+    └── main.js        # lógica del editor (análisis, markers)
+```
+
+Levantar el IDE:
+
 ```bash
-.
-├── program/
-│   ├── Compiscript.g4         # gramática ANTLR del lenguaje
-│   ├── program.cps            # ejemplo de entrada
-│   └── gen/                   # (GENERADO) lexer/parser/visitor
-│
-├── semantic/
-│   ├── errors.py              # ErrorCollector (recolecta y formatea errores)
-│   ├── scope.py               # Estructura de scopes (árbol padre-hijo)
-│   ├── symbols.py             # Símbolos: VariableSymbol, FunctionSymbol, ClassSymbol
-│   ├── types.py               # Sistema de tipos (INTEGER, STRING, BOOLEAN, NULL,
-│   │                          #              ArrayType, ClassType, FunctionType, etc.)
-│   ├── semantic_visitor.py    # *** núcleo del análisis semántico (Pass 1 + Pass 2) ***
-│   └── type_checker.py        # (referencia/experimentos, no requerido para correr)
-│
-├── tests/
-│   ├── valid/                 # .cps que deben PASAR (no imprimir nada)
-│   └── invalid/               # .cps que deben FALLAR (imprimir al menos un error)
-│
-├── antlr-4.13.1-complete.jar  # jar de ANTLR
-└── requirements.txt
+uvicorn ide.server:app --reload --port 3000
+# abre http://localhost:3000
 ```
-¿Qué hace cada archivo en semantic/?
 
-    errors.py
+Cómo funciona:
 
-        Clase ErrorCollector: report(line, col, code, message) y pretty() para mostrar.
+* El frontend envía el código a `POST /analyze`.
+* El backend corre parser + Pass1 + Pass2.
+* Devuelve `{"ok": true}` o `{"ok": false, "errors": [...]}`.
+* El editor marca los errores en la UI.
 
-    scope.py
+> Si ves `405 Method Not Allowed` en `/analyze`, es que montaste estáticos en `/`.
+> En `server.py` dejamos `/static` para estáticos y un handler `GET /` que sirve `index.html`.
 
-        Clase Scope(parent) con define(symbol) y resolve(name) (búsqueda hacia arriba).
+---
 
-    symbols.py
+## 4) Suite de tests
 
-        VariableSymbol(name, typ, is_const, initialized)
+Coloca tus casos en:
 
-        FunctionSymbol(name, typ=FunctionType, params=[VariableSymbol,...])
+```
+tests/
+├── valid/    # casos que deben compilar SIN errores
+└── invalid/  # casos que deben producir errores
+```
 
-        ClassSymbol(name, typ=ClassType, fields: dict, methods: dict, base/base_name)
+Runner (ejemplo sugerido) en `scripts/run_tests.py`:
 
-    types.py
-
-        Primitivos: INTEGER, STRING, BOOLEAN y NULL.
-
-        Compuestos: ArrayType(elem), ClassType(name), FunctionType(params: [Type], ret: Type).
-
-        (Opcional) Si usas : void, lo mapeamos a NULL.
-
-    semantic_visitor.py
-
-        Pass 1 – SymbolCollector:
-
-            Crea scopes (global, bloque {}, función, clase).
-
-            Declara variables/const, funciones (con firma) y clases.
-
-            En clases, recolecta fields y methods.
-
-            Registra el scope en cada ctx y resuelve herencia (base no encontrada, ciclos, merge de miembros, overrides compatibles).
-
-        Pass 2 – TypeCheckerVisitor:
-
-            Usa los scopes de Pass 1 para resolver nombres.
-
-            Validaciones (ver lista más abajo).
-
-            Maneja sufijos en LHS: (), [], . para llamadas, indexación y propiedades.
-
-    type_checker.py
-
-        Archivo auxiliar. El runtime usa semantic_visitor.py.
-
-4) ¿Qué valida el analizador?
-    Declaraciones & asignaciones
-
-        Redeclaración (E001), uso de no declarado (E002), const sin init (E003, si aplica),
-        incompatibilidad de tipos (E004), reasignación a const (E005), LHS inválido (E006).
-
-        Inferencia de tipo en let/const si no hay anotación (desde el initializer).
-
-    Expresiones
-
-        Unario !/-, lógicos &&/||, relacionales, +/- (concat de string si ambos son string), *,/,% (enteros).
-
-        Paréntesis tipados correctamente.
-
-    Arrays
-
-        Literales homogéneos (E011 si mezclas), indexación a[i] con i: integer (E030) y receptor arreglo (E031).
-
-    Funciones
-
-        Chequeo de return (E012 tipo incorrecto, E013 falta valor).
-
-        “Todas las rutas retornan” para funciones con tipo (E015).
-
-        Llamadas: aridad (E021), tipos por argumento (E022), llamada a no-función (E020).
-
-    Control de flujo
-
-        Condiciones booleanas en if/while/do/for (E040).
-
-        break/continue solo dentro de bucles (E041/E042).
-
-        return fuera de función (E014).
-
-    Clases
-
-        Acceso a propiedad/método obj.prop / obj.metodo():
-
-            No-objeto (E033), propiedad/método inexistente (E034).
-
-            Asignación a propiedad valida tipos (E004).
-
-        this dentro de métodos (E043 si se usa fuera).
-
-        new C(...): clase no declarada (E037), aridad/tipos del constructor (E021/E022).
-
-        Herencia class A : B:
-
-            Base no encontrada (E051), ciclo (E052), override incompatible (E053), conflicto de campo heredado (E054).
-
-            constructor no se hereda.
-
-    switch/case
-
-        Tipo compatible con switch(expr) (E060), case duplicado literal (E061).
-
-    Ternario ?:
-
-        Condición booleana (E040), tipo común de ramas (E070 si incompatibles).
-
-        Permite null como rama hacia tipos de referencia/array (lo resuelve _is_assignable).
-
-    Los códigos exactos y mensajes están centralizados en errors.py y el visitor.
-
-   
-5) Cómo correr las pruebas de ejemplo
-
-El repo viene con ejemplos en tests/valid/ y tests/invalid/.
-Puedes correr uno a uno:
 ```bash
-# ejemplos
-python program/Driver.py tests/valid/ternary/01_ok.cps
-python program/Driver.py tests/invalid/switch/02_duplicate_case.cps
+python scripts/run_tests.py                 # corre valid + invalid
+python scripts/run_tests.py --only valid
+python scripts/run_tests.py --only invalid --show-invalid
 ```
+
 Criterio:
 
-    En valid no debe aparecer salida.
+* `valid/` → exit code `0` (OK).
+* `invalid/` → exit code `!= 0` (OK porque era esperado).
+  Con `--show-invalid` también muestra los mensajes de error.
 
-    En invalid debe aparecer al menos un [E###].
+---
 
-6) Flujo interno (cómo funciona)
+## 5) Estructura del proyecto
 
-    Lexer/Parser (ANTLR): CompiscriptLexer tokeniza y CompiscriptParser construye el árbol (program()).
-
-    Pass 1 – SymbolCollector:
-
-        Crea la tabla de símbolos (stack de Scopes) y la asocia a nodos (ctx.scope).
-
-        Declara variables/const/funciones/clases.
-
-        En clases recolecta miembros y resuelve herencia (merge de miembros y validaciones).
-
-    Pass 2 – TypeCheckerVisitor:
-
-        Entra a los scopes guardados y resuelve nombres.
-
-        Tipa expresiones y valida reglas semánticas (ver lista de arriba).
-
-    Driver:
-
-        Si hay errores, los imprime (uno por línea). Si no hay → silencio.
-
-7) Tips y problemas comunes
-
-    Si ves errores tipo “None” en condiciones, verifica visitPrimaryExpr: el caso '(' expression ')' debe visitar la expression, no el token '('.
-
-    Si new C(...) no valida el constructor, revisa que el método se llame constructor exactamente.
-
-    Si this marca E043 dentro de un método, asegúrate de que en Pass 1 se etiquete el contexto del método con su clase (se hace en visitClassDeclaration) y que en Pass 2 se empuje esa clase al stack current_class_stack.
-
-
-
-## 🧩 Características del Lenguaje
-
-Compiscript soporta los siguientes conceptos fundamentales:
-
-### ✅ Tipos de Datos
-
-```cps
-let a: integer = 10;
-let b: string = "hola";
-let c: boolean = true;
-let d = null;
 ```
-
-### ✅ Literales
-
-```cps
-123          // integer
-"texto"      // string
-true, false  // boolean
-null         // nulo
-```
-
-### ✅ Expresiones Aritméticas y Lógicas
-
-```cps
-let x = 5 + 3 * 2;
-let y = !(x < 10 || x > 20);
-```
-
-### ✅ Precedencia y Agrupamiento
-
-```cps
-let z = (1 + 2) * 3;
-```
-
-### ✅ Declaración y Asignación de Variables
-
-```cps
-let nombre: string;
-nombre = "Compiscript";
-```
-
-### ✅ Constantes (`const`)
-
-```cps
-const PI: integer = 314;
-```
-
-### ✅ Funciones y Parámetros
-
-```cps
-function saludar(nombre: string): string {
-  return "Hola " + nombre;
-}
-```
-
-### ✅ Expresiones de Llamada
-
-```cps
-let mensaje = saludar("Mundo");
-```
-
-### ✅ Acceso a Propiedades (`.`)
-
-```cps
-print(dog.nombre);
-```
-
-### ✅ Acceso a Elementos de Arreglo (`[]`)
-
-```cps
-let lista = [1, 2, 3];
-print(lista[0]);
-```
-
-### ✅ Arreglos
-
-```cps
-let notas: integer[] = [90, 85, 100];
-let matriz: integer[][] = [[1, 2], [3, 4]];
-```
-
-### ✅ Funciones como Closures
-
-```cps
-function crearContador(): integer {
-  function siguiente(): integer {
-    return 1;
-  }
-  return siguiente();
-}
-```
-
-### ✅ Clases y Constructores
-
-```cps
-class Animal {
-  let nombre: string;
-
-  function constructor(nombre: string) {
-    this.nombre = nombre;
-  }
-
-  function hablar(): string {
-    return this.nombre + " hace ruido.";
-  }
-}
-```
-
-### ✅ Herencia
-
-```cps
-class Perro : Animal {
-  function hablar(): string {
-    return this.nombre + " ladra.";
-  }
-}
-```
-
-### ✅ `this`
-
-```cps
-this.nombre = "Firulais";
-```
-
-### ✅ Instanciación con `new`
-
-```cps
-let perro: Perro = new Perro("Toby");
-```
-
-### ✅ Bloques y Ámbitos
-
-```cps
-{
-  let x = 42;
-  print(x);
-}
-```
-
-### ✅ Control de Flujo
-
-#### `if` / `else`
-
-```cps
-if (x > 10) {
-  print("Mayor a 10");
-} else {
-  print("Menor o igual");
-}
-```
-
-#### `while`
-
-```cps
-while (x < 5) {
-  x = x + 1;
-}
-```
-
-#### `do-while`
-
-```cps
-do {
-  x = x - 1;
-} while (x > 0);
-```
-
-#### `for`
-
-```cps
-for (let i: integer = 0; i < 3; i = i + 1) {
-  print(i);
-}
-```
-
-#### `foreach`
-
-```cps
-foreach (item in lista) {
-  print(item);
-}
-```
-
-#### `break` / `continue`
-
-```cps
-foreach (n in notas) {
-  if (n < 60) continue;
-  if (n == 100) break;
-  print(n);
-}
-```
-
-### ✅ `switch / case`
-
-```cps
-switch (x) {
-  case 1:
-    print("uno");
-  case 2:
-    print("dos");
-  default:
-    print("otro");
-}
-```
-
-### ✅ `try / catch`
-
-```cps
-try {
-  let peligro = lista[100];
-} catch (err) {
-  print("Error atrapado: " + err);
-}
-```
-
-### ✅ `return`
-
-```cps
-function suma(a: integer, b: integer): integer {
-  return a + b;
-}
-```
-
-### ✅ Recursión
-
-```cps
-function factorial(n: integer): integer {
-  if (n <= 1) return 1;
-  return n * factorial(n - 1);
-}
+.
+├── antlr-4.13.1-complete.jar
+├── ide/
+│   ├── server.py
+│   └── static/ (index.html, main.js)
+├── program/
+│   ├── Compiscript.g4        # gramática ANTLR
+│   ├── program.cps           # ejemplo
+│   ├── Driver.py             # CLI del analizador
+│   └── gen/                  # (GENERADO) lexer/parser/visitor
+├── semantic/
+│   ├── errors.py             # ErrorCollector (report/pretty)
+│   ├── scope.py              # Scopes (árbol padre-hijo)
+│   ├── symbols.py            # VariableSymbol, FunctionSymbol, ClassSymbol
+│   ├── types.py              # INTEGER, STRING, BOOLEAN, NULL, ArrayType, ClassType, FunctionType...
+│   └── semantic_visitor.py   # Pass 1 (símbolos) + Pass 2 (tipado/reglas)
+├── scripts/
+│   └── run_tests.py          # runner de la suite
+├── tests/                    # casos valid/ e invalid/
+└── requirements.txt
 ```
 
 ---
 
-## 📦 Extensión de Archivo
+## 6) ¿Qué valida el analizador?
 
-Todos los archivos fuente de Compiscript deben usar la extensión:
+### Declaraciones & asignaciones
 
-```bash
-program.cps
-```
+* Redeclaración (E001), uso de no declarado (E002), `const` sin init (E003 si aplica).
+* Incompatibilidad de tipos (E004), reasignar `const` (E005), LHS inválido (E006).
+* **Inferencia** en `let/const` si no hay anotación (toma el tipo del initializer).
+
+### Expresiones
+
+* `!` y `-` unario; `&&`, `||`; relacionales; `+/-` (concat string si ambos string); `* / %` solo enteros.
+* Paréntesis tipan correctamente.
+
+### Arreglos
+
+* Literales homogéneos (E011 si mezclas).
+* Indexación `a[i]`: `i` entero (E030) y receptor arreglo (E031).
+
+### Funciones
+
+* `return`: tipo correcto (E012) y “todas las rutas retornan” si la función declara retorno (E015).
+* Llamadas: aridad (E021), tipos por argumento (E022), llamada a no-función (E020).
+
+### Control de flujo
+
+* Condiciones booleanas en `if/while/do/for` (E040).
+* `break/continue` solo dentro de loops (E041/E042).
+* `return` fuera de función (E014).
+
+### Clases, `this`, `new`
+
+* Propiedades/métodos: no-objeto (E033), miembro inexistente (E034), asignación a propiedad verifica tipos (E004).
+* `this` fuera de método de clase (E043).
+* `new C(...)`: clase no declarada (E037), aridad/tipos del constructor (E021/E022).
+
+### Herencia
+
+* `class A : B` base no encontrada (E051), ciclo (E052).
+* Overrides incompatibles (E053), conflictos de campos heredados (E054).
+* El constructor **no** se hereda.
+
+### `switch / case`
+
+* Tipo del `switch(expr)` compatible con `case` (E060).
+* `case` duplicados de literal (E061).
+
+### Ternario `cond ? a : b`
+
+* Condición booleana (E040).
+* Tipo común de ramas (E070 si incompatibles).
+* `null` permitido hacia tipos de referencia/array (regla de asignabilidad).
+
+> Los códigos y mensajes se centralizan en `errors.py` y en `semantic_visitor.py`.
+
+---
+
+## 7) Flujo interno (cómo está implementado)
+
+**Pass 1 – `SymbolCollector`**
+
+* Construye la **tabla de símbolos**: stack de `Scope` (`scope.py`), con `define()` y `resolve()`.
+* Declara variables/const (con o sin anotación), funciones (firma `FunctionType` con parámetros y retorno) y clases (`ClassSymbol` con `fields` y `methods`).
+* En clases: resuelve herencia (base, ciclos, merge de miembros, verificación de overrides).
+* Enlaza cada `ctx` del árbol con su `scope` para que Pass 2 pueda entrar al ámbito correcto.
+
+**Pass 2 – `TypeCheckerVisitor`**
+
+* Entra a los scopes guardados (global, función, bloque, clase).
+* Resuelve nombres y **tipa expresiones**.
+* Implementa sufijos en `leftHandSide`: llamadas `()`, indexación `[]`, acceso `.`.
+* Aplica todas las reglas semánticas listadas arriba y reporta errores con línea/columna.
+
+---
+
+## 8) Consejos y solución de problemas
+
+* **`ModuleNotFoundError` (gen)**
+
+  * Asegúrate de generar en `program/gen` (usa `-Xexact-output-dir`) y crea `program/__init__.py` y `program/gen/__init__.py`.
+* **`405 Method Not Allowed` en `/analyze`**
+
+  * Monta estáticos en `/static` y sirve `GET /` con un handler (el server ya viene así).
+* **IDE devuelve error JSON con atributos diferentes**
+
+  * El `server.py` adapta distintos formatos de errores (`line/lineno`, `column/col`, etc.). Si personalizas `errors.py`, mantén esos nombres o el adaptador.
+* **Ejecución del driver**
+
+  * Usa `python -m program.Driver ...` y ejecuta desde la **raíz** del repo.
+
+---
+
+## 9) Lenguaje (subset soportado)
+
+Incluye tipos primitivos (`integer`, `string`, `boolean`, `null`), arreglos `T[]`, funciones con parámetros tipados y retorno, clases con constructor y métodos, `this`, herencia, control de flujo (`if/else`, `while`, `do-while`, `for`, `foreach`, `break/continue`, `return`), `switch/case`, `try/catch`, operadores aritméticos/lógicos y ternario.
+
+> Los archivos fuente usan extensión **`.cps`**.

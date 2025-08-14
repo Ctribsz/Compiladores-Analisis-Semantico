@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Compiscript IDE</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    .toolbar { display:flex; gap:8px; padding:10px; border-bottom:1px solid #eee; align-items:center; }
+    .toolbar button { padding:6px 12px; cursor:pointer; }
+    .wrap { display:grid; grid-template-columns: 1fr 360px; height: calc(100% - 48px); }
+    #editor { height: 100%; width: 100%; }
+    #errors { padding:10px; overflow:auto; border-left:1px solid #eee; }
+    .err { padding:6px 8px; border-radius:6px; margin-bottom:6px; background:#fff4f4; border:1px solid #ffd1d1; }
+    .ok { color: #0a0; font-weight:600; }
+    .muted { color:#666; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="analyze">Analizar (Ctrl/Cmd + Enter)</button>
+    <span class="muted">Lenguaje: Compiscript (highlight TS)</span>
+  </div>
+  <div class="wrap">
+    <div id="editor"></div>
+    <div id="errors">
+      <div class="muted">Sin resultados todavía.</div>
+    </div>
+  </div>
+
+  <!-- Monaco via CDN -->
+  <script src="https://unpkg.com/monaco-editor@0.45.0/min/vs/loader.js"></script>
+  <script src="/static/main.js"></script>
+</body>
+</html>
