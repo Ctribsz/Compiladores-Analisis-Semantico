@@ -201,6 +201,73 @@ async function analyze() {
 // ===============================
 // Symbols render
 // ===============================
+function escapeHtml(t) {
+  return String(t ?? '').replace(/[&<>"']/g, s => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]
+  ));
+}
+
+function renderSymbol(s) {
+  const kind = `<span class="sym-kind">${escapeHtml(s?.kind || '')}</span>`;
+  const name = `<span class="sym-name">${escapeHtml(s?.name || '(anon)')}</span>`;
+
+  // Para funciones (top-level): params con nombre y tipo
+  const params = (Array.isArray(s?.params) && s.params.length)
+    ? '(' + s.params.map(p =>
+        `${escapeHtml(p?.name || '')}: <span class="sym-type">${escapeHtml(p?.type || '')}</span>`
+      ).join(', ') + ')'
+    : '';
+
+  const type = (s?.return_type)
+    ? `: <span class="sym-type">${escapeHtml(s.return_type)}</span>`
+    : (s?.type ? `: <span class="sym-type">${escapeHtml(s.type)}</span>` : '');
+
+  let html = `<li>${kind} <code class="inline">${name}${params}${type}</code></li>`;
+
+  // ---- Campos de clase ----
+  if (Array.isArray(s?.fields) && s.fields.length) {
+    html += `<ul class="sym-list nested">` +
+      s.fields.map(f =>
+        `<li>• <span class="sym-kind">Field</span> <code class="inline">` +
+        `<span class="sym-name">${escapeHtml(f?.name)}</span>: ` +
+        `<span class="sym-type">${escapeHtml(f?.type)}</span></code></li>`
+      ).join('') +
+      `</ul>`;
+  }
+
+  // ---- Métodos de clase ----
+  if (Array.isArray(s?.methods) && s.methods.length) {
+    html += `<ul class="sym-list nested">` +
+      s.methods.map(m => {
+        // En clases serializamos params como lista de strings (tipos)
+        const sig = (Array.isArray(m?.params) && m.params.length)
+          ? '(' + m.params.map(t => escapeHtml(t)).join(', ') + ')'
+          : '()';
+        const ret = m?.return_type ? ` → ${escapeHtml(m.return_type)}` : '';
+        return `<li>• <span class="sym-kind">Method</span> <code class="inline">` +
+               `<span class="sym-name">${escapeHtml(m?.name)}</span> ` +
+               `<span class="sym-type">${sig}${ret}</span></code></li>`;
+      }).join('') +
+      `</ul>`;
+  }
+
+  return html;
+}
+
+function renderScope(node) {
+  if (!node) return '<div class="muted">Sin tabla de símbolos disponible.</div>';
+  const syms = Array.isArray(node.symbols) ? node.symbols : [];
+  const children = Array.isArray(node.children) ? node.children : [];
+
+  const title = `<div><strong>Scope:</strong> <code class="inline">${escapeHtml(node.scope_name || 'global')}</code></div>`;
+  const list  = syms.length
+    ? `<ul class="sym-list">${syms.map(renderSymbol).join('')}</ul>`
+    : `<div class="muted">— sin símbolos —</div>`;
+  const kids  = children.map(ch => `<div style="margin-left:10px">${renderScope(ch)}</div>`).join('');
+
+  return `<div class="scope-block">${title}${list}${kids}</div>`;
+}
+
 function renderSymbols(root) {
   const el = $('symbols');
   el.innerHTML = '';
@@ -211,33 +278,6 @@ function renderSymbols(root) {
   el.innerHTML = renderScope(root);
 }
 
-function renderScope(node) {
-  const syms = (node.symbols || []).map(s => renderSymbol(s)).join('');
-  const children = (node.children || []).map(ch => `<div style="margin-left:10px">${renderScope(ch)}</div>`).join('');
-  const title = `<div><strong>Scope:</strong> <code class="inline">${node.scope_name || 'global'}</code></div>`;
-  const list = syms ? `<ul class="sym-list">${syms}</ul>` : `<div class="muted">— sin símbolos —</div>`;
-  return `<div class="scope-block">${title}${list}${children}</div>`;
-}
-
-function renderSymbol(s) {
-  const kind = `<span class="sym-kind">${escapeHtml(s.kind || '')}</span>`;
-  const name = `<span class="sym-name">${escapeHtml(s.name || '(anon)')}</span>`;
-
-  // params (para funciones)
-  const params = (s.params && s.params.length)
-    ? '(' + s.params.map(p => `${escapeHtml(p.name)}: <span class="sym-type">${escapeHtml(p.type)}</span>`).join(', ') + ')'
-    : '';
-
-  const type = s.return_type
-    ? `: <span class="sym-type">${escapeHtml(s.return_type)}</span>`
-    : (s.type ? `: <span class="sym-type">${escapeHtml(s.type)}</span>` : '');
-
-  return `<li>${kind} <code class="inline">${name}${params}${type}</code></li>`;
-}
-
-function escapeHtml(t) {
-  return String(t).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
-}
 
 // ===============================
 // Splitter (redimensionar panel lateral)
