@@ -1,34 +1,42 @@
-import os, sys, re
+import os
+import sys
+import re
 from pathlib import Path
-from typing import List, Dict
-from fastapi import FastAPI
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-
+# -------------------------------------------------------------------
+# Rutas / imports
+# -------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))  # para 'program.*'
+sys.path.insert(0, str(ROOT))  # para 'program.*' y 'semantic.*'
 
-# --- ANTLR imports (layout plano detectado) ---
-from program.gen.CompiscriptLexer import CompiscriptLexer
-from program.gen.CompiscriptParser import CompiscriptParser
-from program.gen.CompiscriptVisitor import CompiscriptVisitor
-
+# --- ANTLR imports ---
 from antlr4 import InputStream, CommonTokenStream
 from antlr4.error.ErrorListener import ErrorListener
+from program.gen.CompiscriptLexer import CompiscriptLexer
+from program.gen.CompiscriptParser import CompiscriptParser
+# CompiscriptVisitor no es estrictamente necesario aquí, pero no estorba:
+# from program.gen.CompiscriptVisitor import CompiscriptVisitor
 
-# --- tu semántico ---
-from semantic.semantic_visitor import run_semantic
+# --- Semántico / utilidades ---
+from semantic.semantic_visitor import run_semantic  # debe devolver objeto con errors y/o pretty(); opcional: global_scope
+from semantic.scope import serialize_scope           # helper para serializar Scope a dict JSON-friendly
 
-# -------------------------------------
-# Error listener sintáctico a JSON
-# -------------------------------------
+
+# -------------------------------------------------------------------
+# Error listener de sintaxis -> colecciona en JSON
+# -------------------------------------------------------------------
 class SyntaxErrorCollector(ErrorListener):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.items: List[Dict] = []
-    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
+        self.items: List[Dict[str, Any]] = []
+
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e) -> None:
         self.items.append({
             "line": int(line),
             "column": int(column),
@@ -36,92 +44,126 @@ class SyntaxErrorCollector(ErrorListener):
             "message": msg
         })
 
-# -------------------------------------
-# app FastAPI
-# -------------------------------------
+
+# -------------------------------------------------------------------
+# App FastAPI
+# -------------------------------------------------------------------
 app = FastAPI(title="Compiscript IDE")
-app.mount(
-    "/static",
-    StaticFiles(directory=str(Path(__file__).parent / "static"), html=False),
-    name="static",
-)
+
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR), html=False), name="static")
+
 
 class AnalyzeBody(BaseModel):
     source: str
 
+
+def _pick(obj: Any, names: List[str], default: Optional[Any] = None) -> Any:
+    """Obtiene el primer atributo/clave disponible de 'names' en obj."""
+    for n in names:
+        if isinstance(obj, dict) and n in obj:
+            return obj[n]
+        if hasattr(obj, n):
+            return getattr(obj, n)
+    return default
+
+
 @app.post("/analyze")
 def analyze(body: AnalyzeBody):
-    # 1) Parser
-    input_stream = InputStream(body.source)
-    lexer = CompiscriptLexer(input_stream)
-    stream = CommonTokenStream(lexer)
-    parser = CompiscriptParser(stream)
+    """
+    Analiza código Compiscript:
+    - Si hay errores de sintaxis: devuelve {"ok": False, "errors": [...], "symbols": None}
+    - Si compila sintácticamente: corre el semántico y devuelve errores y la tabla de símbolos (si disponible)
+    """
+    try:
+        # 1) Lexer/Parser
+        input_stream = InputStream(body.source)
+        lexer = CompiscriptLexer(input_stream)
+        stream = CommonTokenStream(lexer)
+        parser = CompiscriptParser(stream)
 
-    syn = SyntaxErrorCollector()
-    parser.removeErrorListeners()
-    parser.addErrorListener(syn)
+        syn = SyntaxErrorCollector()
+        parser.removeErrorListeners()
+        parser.addErrorListener(syn)
 
-    tree = parser.program()
+        tree = parser.program()  # ajusta si tu regla inicial tiene otro nombre
 
-    # 2) Si hay errores sintácticos -> devolverlos
-    if syn.items:
-        return {"ok": False, "errors": syn.items}
+        # 2) Errores sintácticos -> salida inmediata (sin símbolos)
+        if syn.items:
+            return JSONResponse({"ok": False, "errors": syn.items, "symbols": None}, status_code=422)
 
-    # 3) Semántico
-    sem = run_semantic(tree)
+        # 3) Semántico
+        sem = run_semantic(tree)
 
-    # --- Adaptador robusto de errores -> JSON ---
-    def pick(obj, names, default=None):
-        for n in names:
-            if isinstance(obj, dict) and n in obj:
-                return obj[n]
-            if hasattr(obj, n):
-                return getattr(obj, n)
-        return default
+        # 3a) Adaptador robusto de errores semánticos a JSON
+        items: List[Dict[str, Any]] = []
+        seq = None
+        if hasattr(sem, "items"):
+            seq = sem.items
+        elif hasattr(sem, "errors"):
+            seq = sem.errors
 
-    items = []
+        if isinstance(seq, list) and seq:
+            for it in seq:
+                if isinstance(it, dict):
+                    l = int(_pick(it, ["line", "lineno", "row"], 0) or 0)
+                    c = int(_pick(it, ["column", "col"], 0) or 0)
+                    code = str(_pick(it, ["code", "error_code", "id"], "E???"))
+                    msg = str(_pick(it, ["message", "msg", "text"], ""))
+                    items.append({"line": l, "column": c, "code": code, "message": msg})
+                elif isinstance(it, tuple) and len(it) >= 4:
+                    l, c, code, msg = it[:4]
+                    items.append({"line": int(l), "column": int(c), "code": str(code), "message": str(msg)})
+                else:
+                    l = int(_pick(it, ["line", "lineno", "row"], 0) or 0)
+                    c = int(_pick(it, ["column", "col"], 0) or 0)
+                    code = str(_pick(it, ["code", "error_code", "id"], "E???"))
+                    msg = str(_pick(it, ["message", "msg", "text"], ""))
+                    items.append({"line": l, "column": c, "code": code, "message": msg})
+        else:
+            # No hay colección accesible: intentar parsear pretty() "[EXXX] (l:c) msg"
+            pretty = sem.pretty() if hasattr(sem, "pretty") else ""
+            for ln in pretty.splitlines():
+                m = re.match(r"\[(E\d+|SYN)\]\s*\((\d+):(\d+)\)\s*(.*)", ln.strip())
+                if m:
+                    code, l, c, msg = m.groups()
+                    items.append({"line": int(l), "column": int(c), "code": code, "message": msg})
 
-    # Caso 1: colección directa (lista) en sem.items / sem.errors
-    seq = None
-    if hasattr(sem, "items"):
-        seq = sem.items
-    elif hasattr(sem, "errors"):
-        seq = sem.errors
+        ok = len(items) == 0
 
-    if isinstance(seq, list) and seq:
-        for it in seq:
-            # dict
-            if isinstance(it, dict):
-                l = int(pick(it, ["line", "lineno", "row"], 0) or 0)
-                c = int(pick(it, ["column", "col"], 0) or 0)
-                code = str(pick(it, ["code", "error_code", "id"], "E???"))
-                msg  = str(pick(it, ["message", "msg", "text"], ""))
-                items.append({"line": l, "column": c, "code": code, "message": msg})
-            # tupla (line, col, code, msg)
-            elif isinstance(it, tuple) and len(it) >= 4:
-                l, c, code, msg = it[:4]
-                items.append({"line": int(l), "column": int(c), "code": str(code), "message": str(msg)})
-            # objeto (SemError)
-            else:
-                l = int(pick(it, ["line", "lineno", "row"], 0) or 0)
-                c = int(pick(it, ["column", "col"], 0) or 0)
-                code = str(pick(it, ["code", "error_code", "id"], "E???"))
-                msg  = str(pick(it, ["message", "msg", "text"], ""))
-                items.append({"line": l, "column": c, "code": code, "message": msg})
-    else:
-        # Caso 2: no hay colección accesible → parsear pretty() "[EXXX] (l:c) msg"
-        pretty = sem.pretty() if hasattr(sem, "pretty") else ""
-        for ln in pretty.splitlines():
-            m = re.match(r"\[(E\d+|SYN)\]\s*\((\d+):(\d+)\)\s*(.*)", ln.strip())
-            if m:
-                code, l, c, msg = m.groups()
-                items.append({"line": int(l), "column": int(c), "code": code, "message": msg})
+        # 3b) Tabla de símbolos (scope global si está disponible)
+        global_scope = getattr(sem, "global_scope", None) or getattr(sem, "scope", None)
+        symbols_payload = serialize_scope(global_scope) if global_scope is not None else None
 
-    ok = len(items) == 0
-    return {"ok": ok, "errors": items}
+        status = 200 if ok else 422
+        return JSONResponse({"ok": ok, "errors": items, "symbols": symbols_payload}, status_code=status)
+
+    except Exception as e:
+        # Error inesperado en el servidor
+        return JSONResponse(
+            {"ok": False, "errors": [{"code": "EXC", "message": str(e), "line": 0, "column": 0}], "symbols": None},
+            status_code=500
+        )
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    """
+    Sube un archivo .cps y devuelve su contenido para cargarlo en el editor.
+    """
+    name = (file.filename or "").strip()
+    if not name.lower().endswith(".cps"):
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos .cps")
+    content_bytes = await file.read()
+    # Decodificar como UTF-8 tolerante
+    content = content_bytes.decode("utf-8", errors="replace")
+    return {"ok": True, "filename": name, "code": content}
 
 
 @app.get("/")
 def index():
-    index_path = Path(__file__).parent / "static" / "index.html"
+    """
+    Sirve la UI del IDE (index.html).
+    """
+    index_path = STATIC_DIR / "index.html"
     return HTMLResponse(index_path.read_text(encoding="utf-8"))

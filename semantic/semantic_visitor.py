@@ -975,8 +975,27 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 # -----------------------------
 # Orquestador
 # -----------------------------
-def run_semantic(tree) -> ErrorCollector:
+class SemResult:
+    """Contenedor para lo que consume el IDE/web: lista de errores + scope global."""
+    def __init__(self, errors_obj: ErrorCollector, global_scope: Scope):
+        # normaliza a lista si hay método to_list(); si no, intenta .errors; sino vacío
+        if hasattr(errors_obj, "to_list"):
+            self.errors = errors_obj.to_list()
+        elif hasattr(errors_obj, "errors"):
+            self.errors = errors_obj.errors
+        else:
+            self.errors = []
+        self._errors_obj = errors_obj
+        self.global_scope = global_scope
+
+    # para que el adaptador del server pueda usar pretty() si lo necesita
+    def pretty(self) -> str:
+        if hasattr(self._errors_obj, "pretty"):
+            return self._errors_obj.pretty()
+        return ""
+
+def run_semantic(tree) -> SemResult:
     errors = ErrorCollector()
     p1 = SymbolCollector(errors); p1.visit(tree)
     p2 = TypeCheckerVisitor(errors, p1.global_scope, p1.scopes_by_ctx); p2.visit(tree)
-    return errors
+    return SemResult(errors, p1.global_scope)
