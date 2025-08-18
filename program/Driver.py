@@ -1,26 +1,74 @@
-import sys, os
+import sys
+import os
 from antlr4 import FileStream, CommonTokenStream
-from program.gen.CompiscriptLexer import CompiscriptLexer
-from program.gen.CompiscriptParser import CompiscriptParser
 from antlr4.error.ErrorListener import ErrorListener
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# Permitir imports tipo "program.gen.*" y "semantic.*" ejecutando desde la raíz
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-# --- Listener para errores sintácticos bonitos
+from program.gen.CompiscriptLexer import CompiscriptLexer
+from program.gen.CompiscriptParser import CompiscriptParser
+
+
+# -----------------------------
+# Listener para errores sintácticos bonitos
+# -----------------------------
 class SyntaxErrorCollector(ErrorListener):
     def __init__(self):
         super().__init__()
         self.count = 0
+
     def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
         self.count += 1
+        # Formato requerido por el IDE / enunciado
         print(f"[SYN] ({line}:{column}) {msg}")
 
+
+# -----------------------------
+# Utils para imprimir errores semánticos
+# -----------------------------
+def _print_semantic_errors_from_list(errors_list):
+    """
+    Recibe una lista de errores (dicts, tuplas u objetos con attrs)
+    y los imprime como: [EXXX] (l:c) msg
+    """
+    def pick(obj, names, default=None):
+        for n in names:
+            if isinstance(obj, dict) and n in obj:
+                return obj[n]
+            if hasattr(obj, n):
+                return getattr(obj, n)
+        return default
+
+    for it in errors_list:
+        if isinstance(it, tuple) and len(it) >= 4:
+            l, c, code, msg = it[:4]
+            print(f"[{code}] ({int(l)}:{int(c)}) {msg}")
+        else:
+            l = int(pick(it, ["line", "lineno", "row"], 0) or 0)
+            c = int(pick(it, ["column", "col"], 0) or 0)
+            code = str(pick(it, ["code", "error_code", "id"], "E???"))
+            msg  = str(pick(it, ["message", "msg", "text"], ""))
+            print(f"[{code}] ({l}:{c}) {msg}")
+
+
+# -----------------------------
+# Main
+# -----------------------------
 def main(argv):
     if len(argv) < 2:
-        print("Uso: python program/Driver.py <archivo.cps>")
+        print("Uso: python -m program.Driver <archivo.cps>")
         sys.exit(2)
 
-    input_stream = FileStream(argv[1], encoding="utf-8")
+    in_path = argv[1]
+    if not os.path.exists(in_path):
+        print(f"Archivo no encontrado: {in_path}")
+        sys.exit(2)
+
+    # 1) Parser
+    input_stream = FileStream(in_path, encoding="utf-8")
     lexer = CompiscriptLexer(input_stream)
     stream = CommonTokenStream(lexer)
     parser = CompiscriptParser(stream)
@@ -29,21 +77,50 @@ def main(argv):
     parser.removeErrorListeners()
     parser.addErrorListener(syn_errors)
 
-    tree = parser.program()  # regla inicial (según la gramática)
+    tree = parser.program()  # Regla inicial según tu gramática
 
+    # 2) Si hubo errores de sintaxis -> exit 1
     if syn_errors.count > 0:
         sys.exit(1)
 
-    # --- Análisis semántico
+    # 3) Semántico
     from semantic.semantic_visitor import run_semantic
-    sem_errors = run_semantic(tree)
+    sem = run_semantic(tree)
 
-    if sem_errors.has_errors():
-        print(sem_errors.pretty())
+    # 3a) Normalizar cómo vienen los errores
+    # Caso A: SemResult moderno (tiene 'errors' y opcional pretty())
+    errors_list = getattr(sem, "errors", None)
+    if errors_list is not None:
+        has_err = len(errors_list) > 0
+        if has_err:
+            # Si hay pretty() úsalo; si no, imprime uno por uno
+            if hasattr(sem, "pretty") and callable(getattr(sem, "pretty")):
+                pretty = sem.pretty()
+                if pretty:
+                    print(pretty, end="" if pretty.endswith("\n") else "\n")
+                else:
+                    _print_semantic_errors_from_list(errors_list)
+            else:
+                _print_semantic_errors_from_list(errors_list)
+            sys.exit(1)
+        # Si no hay errores, exit 0 sin imprimir nada (comportamiento requerido)
+        sys.exit(0)
+
+    # Caso B: compatibilidad con ErrorCollector clásico
+    # Debe tener has_errors() y pretty()
+    has_err = False
+    if hasattr(sem, "has_errors") and callable(getattr(sem, "has_errors")):
+        has_err = sem.has_errors()
+    if has_err:
+        if hasattr(sem, "pretty") and callable(getattr(sem, "pretty")):
+            out = sem.pretty()
+            if out:
+                print(out, end="" if out.endswith("\n") else "\n")
         sys.exit(1)
 
-    # Si todo bien, no imprime nada (comportamiento pedido)
-    # print("OK")  # si se quiere confirmar
+    # OK
+    sys.exit(0)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main(sys.argv)
