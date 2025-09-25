@@ -76,6 +76,12 @@
     .btn:hover { background: var(--btn-h); transform: translateY(-1px); }
     .btn.primary { border-color: transparent; background: linear-gradient(90deg, var(--accent), var(--accent-2)); color:#fff; }
     .btn.primary:hover { filter: brightness(1.05); }
+    .btn.tac { background: linear-gradient(90deg, #9333ea, #ec4899); color:#fff; border:0; }
+    
+    /* Checkbox style */
+    .checkbox-group { display: flex; align-items: center; gap: 8px; }
+    .checkbox-group input[type="checkbox"] { width: 16px; height: 16px; }
+    .checkbox-group label { font-size: 14px; cursor: pointer; }
 
     .chip {
       padding:6px 10px; border-radius:999px; font-size:12px; background: var(--chip);
@@ -126,6 +132,26 @@
     .tab.active { color:var(--text); background: var(--chip); border-color: var(--border); }
     .panel .body { padding:12px; overflow:auto; height: 100%; }
 
+    /* TAC display */
+    .tac-code {
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      background: var(--chip);
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .tac-stats {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
     /* Listados */
     .msg-ok { color: var(--ok); font-weight:700; }
     .err {
@@ -166,6 +192,14 @@
       <div class="rightTools">
         <input id="uploadInput" type="file" accept=".cps" />
         <button id="uploadBtn" type="button" class="btn">Subir .cps</button>
+        <div class="checkbox-group">
+          <input type="checkbox" id="generateTAC" />
+          <label for="generateTAC">TAC</label>
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="optimizeTAC" />
+          <label for="optimizeTAC">Optimizar</label>
+        </div>
         <button id="themeToggle" type="button" class="btn" title="Tema claro/oscuro">🌑 Oscuro</button>
         <button id="analyze" type="button" class="btn primary">Analizar (Ctrl/Cmd + Enter)</button>
       </div>
@@ -180,13 +214,14 @@
 
       <div class="splitter" id="splitter" aria-hidden="true"></div>
 
-      <!-- Panel derecho con tabs de Errores / Símbolos -->
+      <!-- Panel derecho con tabs -->
       <aside class="side">
         <section class="panel" style="min-height:64%;">
           <div class="head">
             <div class="tabs">
               <div class="tab active" data-tab="errors">Errores</div>
               <div class="tab" data-tab="symbols">Símbolos</div>
+              <div class="tab" data-tab="tac">TAC</div>
             </div>
             <div style="flex:1;"></div>
             <span class="chip" id="errorCount">0 errores</span>
@@ -194,6 +229,7 @@
           <div class="body">
             <div id="errors"><div class="muted">Sin resultados todavía.</div></div>
             <div id="symbols" style="display:none;"><div class="muted">Tabla de símbolos aún no generada.</div></div>
+            <div id="tac" style="display:none;"><div class="muted">Código TAC no generado.</div></div>
           </div>
         </section>
 
@@ -204,14 +240,19 @@
               <p><b>Atajos</b><br/>
               • <code class="inline">Ctrl/Cmd + Enter</code> Analizar<br/>
               </p>
+              <p><b>Generación TAC</b><br/>
+              • Activa <b>TAC</b> para generar código intermedio<br/>
+              • Activa <b>Optimizar</b> para aplicar optimizaciones<br/>
+              </p>
               <p><b>Sintaxis en clases</b><br/>
               • Campos: <code class="inline">let/var/const</code><br/>
               • Métodos y constructor: <code class="inline">function</code><br/>
               </p>
               <p><b>Flujo del IDE</b><br/>
               1. Escribe o <em>Sube .cps</em>.<br/>
-              2. Presiona <b>Analizar</b>.<br/>
-              3. Revisa <b>Errores</b> o cambia a <b>Símbolos</b>.<br/>
+              2. (Opcional) Activa TAC/Optimizar.<br/>
+              3. Presiona <b>Analizar</b>.<br/>
+              4. Revisa <b>Errores</b>, <b>Símbolos</b> o <b>TAC</b>.<br/>
               </p>
             </div>
           </div>
@@ -222,6 +263,6 @@
 
   <!-- Monaco via CDN -->
   <script src="https://unpkg.com/monaco-editor@0.45.0/min/vs/loader.js"></script>
-  <script src="/static/main.js?v=11"></script>
+  <script src="/static/main.js?v=12"></script>
 </body>
 </html>
