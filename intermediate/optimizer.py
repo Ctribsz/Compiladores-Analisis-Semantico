@@ -217,23 +217,28 @@ class TACOptimizer:
 
     
     def dead_code_elimination(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
-        """Elimina código muerto (variables no usadas)"""
+        """Elimina código muerto (conservador, intra-bloque)."""
         used_vars: Set[str] = set()
-        
-        # 1) marcar usos directos
+
+        # 1) Marcar usos directos (incluye casos donde el 'operando' va en result)
         for inst in instructions:
-            if inst.op in [TACOp.PRINT, TACOp.RETURN, TACOp.IF_TRUE, TACOp.IF_FALSE]:
+            op = inst.op
+            # Operaciones con efecto/flujo: marcan su operando
+            if op in (TACOp.PRINT, TACOp.RETURN, TACOp.IF_TRUE, TACOp.IF_FALSE, TACOp.PARAM):
                 if inst.arg1 is not None:
                     used_vars.add(str(inst.arg1))
-            if inst.op == TACOp.PARAM:
-                if inst.arg1 is not None:
-                    used_vars.add(str(inst.arg1))
-            if inst.arg1 is not None and inst.op != TACOp.ASSIGN:
+            # Llamadas: conservamos la CALL siempre; los args ya se marcan por PARAM
+            # Aritm/relacionales usan arg1/arg2
+            if inst.arg1 is not None and op != TACOp.ASSIGN:
                 used_vars.add(str(inst.arg1))
             if inst.arg2 is not None:
                 used_vars.add(str(inst.arg2))
-        
-        # 2) propagar hacia atrás (muy simplificado)
+            # MUY IMPORTANTE: en ARRAY_ASSIGN / FIELD_ASSIGN el receptor está en 'result'
+            if op in (TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN):
+                if inst.result is not None:
+                    used_vars.add(str(inst.result))
+
+        # 2) Propagar hacia atrás (muy simplificado)
         changed = True
         while changed:
             changed = False
@@ -243,13 +248,14 @@ class TACOptimizer:
                         used_vars.add(str(inst.arg1)); changed = True
                     if inst.arg2 is not None and str(inst.arg2) not in used_vars:
                         used_vars.add(str(inst.arg2)); changed = True
-        
-        # 3) eliminar asignaciones no usadas, pero conservar side-effects/control
+
+        # 3) Conservar side-effects/flujo siempre
         keep_ops = {
             TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
             TACOp.PRINT, TACOp.RETURN, TACOp.PARAM, TACOp.CALL,
             TACOp.FUNC_START, TACOp.FUNC_END, TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN
         }
+
         result: List[TACInstruction] = []
         for inst in instructions:
             if inst.op in keep_ops:
@@ -258,6 +264,7 @@ class TACOptimizer:
                 result.append(inst)
             # else: muerto → se elimina
         return result
+
     
     def algebraic_simplification(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """Simplificaciones algebraicas básicas"""
