@@ -138,7 +138,8 @@ def main():
             output += f"# Etiquetas: {result.tac_program.label_counter}\n"
             output += f"# Instrucciones: {len(result.tac_program.instructions)}\n"
             output += "#" + "="*50 + "\n\n"
-            output += result.get_tac_code()
+            output += result.tac_program.to_string(numbered=True)  # usamos la versión numerada
+
         else:
             output = result.get_tac_code()
         

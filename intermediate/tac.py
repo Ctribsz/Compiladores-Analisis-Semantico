@@ -182,6 +182,16 @@ class TACProgram:
         # mantén temp_counter como “máximo creado” para reportes
         self.temp_counter = max(self.temp_counter, int(t[1:]))
         return t
+    def to_string(self, numbered: bool = False) -> str:
+        lines = []
+        for i, inst in enumerate(self.instructions):
+            s = str(inst)
+            if numbered:
+                lines.append(f"{i:04d}: {s}")
+            else:
+                lines.append(s)
+        return "\n".join(lines)
+
 
     # Nuevo método:
     def free_temp(self, name: str):

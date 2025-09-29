@@ -43,6 +43,10 @@ class TACGenerator(CompiscriptVisitor):
         for name, symbol in self.global_scope.symbols.items():
             if isinstance(symbol, ClassSymbol):
                 self.class_symbols[name] = symbol
+    def _id(self, ctx, i: int = 0) -> str:
+        """Texto del i-ésimo token Identifier en 'ctx' (o '' si no hay)."""
+        tok = ctx.getToken(CompiscriptParser.Identifier, i)
+        return tok.getText() if tok is not None else ""
     
     def _enter_scope(self, ctx: ParserRuleContext):
         """Entra a un scope basado en el contexto"""
@@ -95,7 +99,7 @@ class TACGenerator(CompiscriptVisitor):
     # ========== DECLARATIONS ==========
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
         """Declara una variable"""
-        var_name = ctx.Identifier().getText()
+        var_name = self._id(ctx)
         
         if ctx.initializer():
             # Variable con inicialización
@@ -109,7 +113,7 @@ class TACGenerator(CompiscriptVisitor):
     
     def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         """Declara una constante"""
-        const_name = ctx.Identifier().getText()
+        const_name = self._id(ctx)
         init_value = self.visit(ctx.expression())
         const_op = self._make_variable(const_name)
         self.program.emit(TACOp.ASSIGN, const_op, init_value)
@@ -134,7 +138,7 @@ class TACGenerator(CompiscriptVisitor):
         if len(ctx.expression()) == 1:
             # Asignación simple: id = expr
             # Regla esperada: Identifier '=' expression
-            var_name = ctx.Identifier(0).getText()
+            var_name = self._id(ctx)
             value    = self.visit(ctx.expression(0))
             var_op   = self._make_variable(var_name)
             self.program.emit(TACOp.ASSIGN, var_op, value)
@@ -143,7 +147,7 @@ class TACGenerator(CompiscriptVisitor):
         else:
             # Asignación a propiedad: expr '.' Identifier '=' expression
             obj       = self.visit(ctx.expression(0))
-            prop_name = ctx.Identifier(0).getText()   # el Identifier después del '.'
+            prop_name = self._id(ctx)
             value     = self.visit(ctx.expression(1))
             prop_op   = self._make_constant(prop_name)
             self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
@@ -268,7 +272,7 @@ class TACGenerator(CompiscriptVisitor):
     
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
         """Genera código para foreach (desazucarado a for con índice)"""
-        iter_var = ctx.Identifier().getText()      # Ej: for (item in array) { ... }
+        iter_var = self._id(ctx)
         array = self.visit(ctx.expression())       # array sobre el que se itera
 
         # Temporales para manejo de índice y longitud
@@ -395,7 +399,7 @@ class TACGenerator(CompiscriptVisitor):
     # ========== FUNCTIONS ==========
     def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
         """Genera código para declaración de función"""
-        func_name = ctx.Identifier().getText()
+        func_name = self._id(ctx)
         self.current_function = func_name
         
         # Emitir inicio de función
@@ -408,7 +412,7 @@ class TACGenerator(CompiscriptVisitor):
         # Parámetros (ya están en el scope como variables)
         if ctx.parameters():
             for param in ctx.parameters().parameter():
-                _ = param.Identifier().getText()
+                _ = self._id(param)
                 # Los parámetros ya están definidos en el scope
         
         # Cuerpo de la función
@@ -424,7 +428,7 @@ class TACGenerator(CompiscriptVisitor):
     # ========== CLASSES ==========
     def visitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
         """Genera código para declaración de clase"""
-        class_name = ctx.Identifier(0).getText()
+        class_name = self._id(ctx)
         self.current_class = class_name
         
         # Por ahora, las clases se manejan como estructuras
@@ -449,21 +453,34 @@ class TACGenerator(CompiscriptVisitor):
         return self.visit(ctx.assignmentExpr())
     
     def visitAssignExpr(self, ctx: CompiscriptParser.AssignExprContext):
-        """Maneja asignación en expresión"""
-        lhs = ctx.lhs
         rhs = self.visit(ctx.assignmentExpr())
-        
-        # Por simplicidad, asumimos que lhs es un identificador
-        if hasattr(lhs, 'primaryAtom'):
-            atom = lhs.primaryAtom()
-            if hasattr(atom, 'Identifier'):
-                var_name = atom.Identifier().getText()
-                var_op = self._make_variable(var_name)
-                self.program.emit(TACOp.ASSIGN, var_op, rhs)
-                self._free_if_temp(rhs)
-                return var_op
-        
+
+        # Analizamos el LHS (leftHandSide = primaryAtom + suffixOp*)
+        lhs_ctx = ctx.lhs
+        suffixes = list(lhs_ctx.suffixOp())
+        base_atom = lhs_ctx.primaryAtom()
+
+        # Caso A: asignación a índice de arreglo:  <id> '[' expr ']'
+        if suffixes and suffixes[-1].getChild(0).getText() == '[':
+            array_name = self._id(base_atom)  # nombre del arreglo
+            array_op = self._make_variable(array_name)
+            index = self.visit(suffixes[-1].expression())
+            self.program.emit(TACOp.ARRAY_ASSIGN, array_op, index, rhs)
+            self._free_if_temp(index, rhs)
+            return array_op  # valor de la expr es el lvalue (no se usa en stmt, pero ok)
+
+        # Caso B: identificador simple
+        if not suffixes and hasattr(base_atom, "Identifier"):
+            var_name = self._id(base_atom)
+            var_op = self._make_variable(var_name)
+            self.program.emit(TACOp.ASSIGN, var_op, rhs)
+            self._free_if_temp(rhs)
+            return var_op
+
+        # Otros lvalues (propiedades) los cubre PropertyAssignExpr por gramática;
+        # aquí devolvemos rhs tal cual para no duplicar efectos.
         return rhs
+
     
     def visitExprNoAssign(self, ctx: CompiscriptParser.ExprNoAssignContext):
         """Visita expresión sin asignación"""
@@ -738,12 +755,12 @@ class TACGenerator(CompiscriptVisitor):
     
     def visitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         """Visita un identificador"""
-        name = ctx.Identifier().getText()
+        name = self._id(ctx)
         return self._make_variable(name)
     
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         """Genera código para new"""
-        class_name = ctx.Identifier().getText()
+        class_name = self._id(ctx)
         temp = self.program.new_temp()
         
         # Crear nueva instancia
@@ -822,7 +839,7 @@ class TACGenerator(CompiscriptVisitor):
     
     def _apply_property(self, obj: TACOperand, prop_ctx) -> TACOperand:
         """Aplica acceso a propiedad"""
-        prop_name = prop_ctx.Identifier().getText()
+        prop_name = self._id(prop_ctx)
         prop_op = self._make_constant(prop_name)
         result = self.program.new_temp()
         self.program.emit(TACOp.FIELD_ACCESS, result, obj, prop_op)
@@ -843,7 +860,7 @@ class TACGenerator(CompiscriptVisitor):
         
         # Catch block
         self.program.emit_label(catch_label)
-        error_var = ctx.Identifier().getText()
+        error_var = self._id(ctx)
         # Asignar error a la variable (simplificado)
         error_op = self._make_variable(error_var)
         self.visit(ctx.block(1))
