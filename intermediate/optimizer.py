@@ -29,21 +29,25 @@ class TACOptimizer:
         self.optimized_instructions: List[TACInstruction] = []
     
     def optimize(self) -> TACProgram:
-        """Aplica todas las optimizaciones disponibles"""
         instructions = self.program.instructions.copy()
-        
+
         instructions = self.constant_folding(instructions)
         instructions = self.constant_propagation(instructions)
-        instructions = self.dead_code_elimination(instructions)
+        instructions = self.constant_folding(instructions)
+        instructions = self.copy_propagation(instructions)
+        instructions = self.constant_propagation(instructions)  # <- extra
+        instructions = self.constant_folding(instructions)      # <- extra
         instructions = self.algebraic_simplification(instructions)
+        instructions = self.remove_redundant_moves(instructions)
         instructions = self.remove_redundant_jumps(instructions)
-        
-        # Crear nuevo programa optimizado
-        optimized = TACProgram()
-        optimized.instructions = instructions
-        optimized.temp_counter = self.program.temp_counter
-        optimized.label_counter = self.program.label_counter
-        return optimized
+
+
+        out = TACProgram()
+        out.instructions = instructions
+        out.temp_counter = self.program.temp_counter
+        out.label_counter = self.program.label_counter
+        return out
+
     
     # ---------------- passes ----------------
     def constant_folding(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
@@ -82,6 +86,17 @@ class TACOptimizer:
                         result.append(TACInstruction(TACOp.ASSIGN, inst.result, TACOperand(v, is_constant=True)))
                         continue
                 result.append(inst); continue
+            
+            # IF con condición constante
+            if inst.op in (TACOp.IF_TRUE, TACOp.IF_FALSE) and _is_const(inst.arg1):
+                cond = bool(_const_val(inst.arg1))
+                if (inst.op == TACOp.IF_TRUE and cond) or (inst.op == TACOp.IF_FALSE and not cond):
+                    # toma siempre la rama: reemplazar por GOTO
+                    result.append(TACInstruction(TACOp.GOTO, arg1=inst.arg2))
+                else:
+                    # nunca toma la rama: eliminar instrucción
+                    pass
+                continue
 
             # Relacionales
             if inst.op in [TACOp.LT, TACOp.LE, TACOp.GT, TACOp.GE, TACOp.EQ, TACOp.NE]:
@@ -98,6 +113,8 @@ class TACOptimizer:
                         result.append(TACInstruction(TACOp.ASSIGN, inst.result, TACOperand(v, is_constant=True)))
                         continue
                 result.append(inst); continue
+            
+
 
             # Unarios
             if inst.op == TACOp.NEG:
@@ -120,37 +137,82 @@ class TACOptimizer:
             result.append(inst)
         
         return result
+    def remove_redundant_moves(self, instructions):
+        out = []
+        for inst in instructions:
+            if inst.op == TACOp.ASSIGN and inst.result is not None and inst.arg1 is not None:
+                if str(inst.result) == str(inst.arg1):
+                    # x = x  --> eliminar
+                    continue
+            out.append(inst)
+        return out
+
     
     def constant_propagation(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
-        """Propaga valores constantes conocidos"""
-        constants: Dict[str, TACOperand] = {}
-        result: List[TACInstruction] = []
-        
-        for inst in instructions:
-            new_inst = inst
+        """
+        Propagación de constantes *local a bloque lineal*:
+        - Resetea el mapa de constantes al cruzar límites de control:
+        LABEL, GOTO, IF_TRUE/FALSE, RETURN, CALL, PARAM, FUNC_START/END,
+        además de ARRAY_ASSIGN / FIELD_ASSIGN (efectos a memoria).
+        - Sustituye operands por constantes conocidas.
+        - Pliega IF_TRUE / IF_FALSE con condición constante.
+        """
+        boundaries = {
+            TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
+            TACOp.RETURN, TACOp.CALL, TACOp.PARAM,
+            TACOp.FUNC_START, TACOp.FUNC_END,
+            TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN
+        }
 
-            # Sustituir operandos por constantes conocidas (arg1, luego arg2)
-            if inst.arg1 and not _is_const(inst.arg1):
-                key = str(inst.arg1)
-                if key in constants:
-                    new_inst = TACInstruction(inst.op, inst.result, constants[key], inst.arg2)
-            if new_inst.arg2 and not _is_const(new_inst.arg2):
-                key = str(new_inst.arg2)
-                if key in constants:
-                    new_inst = TACInstruction(new_inst.op, new_inst.result, new_inst.arg1, constants[key])
-            
-            # Registrar nuevas constantes para ASSIGN var = const
-            if inst.op == TACOp.ASSIGN and _is_const(inst.arg1):
-                if inst.result and not getattr(inst.result, "is_temp", False):
-                    constants[str(inst.result)] = inst.arg1
-            
-            # Si la variable resultado se modifica con otra op, deja de ser constante
-            if inst.result and str(inst.result) in constants and inst.op != TACOp.ASSIGN:
-                del constants[str(inst.result)]
-            
-            result.append(new_inst)
-        
-        return result
+        consts: Dict[str, TACOperand] = {}
+        out: List[TACInstruction] = []
+
+        def reset():
+            consts.clear()
+
+        def subst(opnd: Optional[TACOperand]) -> Optional[TACOperand]:
+            if opnd is None or _is_const(opnd):
+                return opnd
+            key = str(opnd)
+            return consts.get(key, opnd)
+
+        for inst in instructions:
+            # Si estamos en un límite de bloque, reseteamos antes de procesar
+            if inst.op in boundaries:
+                # Plegar IF_* si la condición ya era constante ANTES de resetear
+                if inst.op in (TACOp.IF_TRUE, TACOp.IF_FALSE) and _is_const(inst.arg1):
+                    cond = bool(_const_val(inst.arg1))
+                    if (inst.op == TACOp.IF_TRUE and cond) or (inst.op == TACOp.IF_FALSE and not cond):
+                        # IF siempre toma la rama -> convertir a GOTO
+                        out.append(TACInstruction(TACOp.GOTO, arg1=inst.arg2))
+                    else:
+                        # IF nunca toma la rama -> eliminar la instrucción
+                        pass
+                else:
+                    out.append(inst)
+                reset()
+                # Si es RETURN, también resetea (ya hecho) y sigue
+                continue
+
+            # Sustituir operandos
+            a1 = subst(inst.arg1)
+            a2 = subst(inst.arg2)
+
+            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+
+            #  mapear también temporales (intra-bloque es seguro)
+            if new_inst.op == TACOp.ASSIGN and _is_const(new_inst.arg1):
+                if new_inst.result is not None:
+                    consts[str(new_inst.result)] = new_inst.arg1
+            else:
+                if new_inst.result is not None and str(new_inst.result) in consts:
+                    del consts[str(new_inst.result)]
+
+
+            out.append(new_inst)
+
+        return out
+
     
     def dead_code_elimination(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """Elimina código muerto (variables no usadas)"""
@@ -280,6 +342,57 @@ class TACOptimizer:
             result.append(inst)
         
         return result
+    
+    def copy_propagation(self, instructions):
+        """
+        Propagación de copias local a bloque lineal.
+        Regla: result = x  ==> sustituye usos posteriores de 'result' por 'x'
+        Reinicia en boundaries (LABEL, GOTO, IF_*, RETURN, CALL, PARAM, FUNC_*, ARRAY_ASSIGN, FIELD_ASSIGN).
+        """
+        boundaries = {
+            TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
+            TACOp.RETURN, TACOp.CALL, TACOp.PARAM,
+            TACOp.FUNC_START, TACOp.FUNC_END,
+            TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN
+        }
+        alias = {}  # nombre -> nombre origen
+
+
+        def reset():
+            alias.clear()
+
+        def root(name: str) -> str:
+            while name in alias and alias[name] != name:
+                name = alias[name]
+            return name
+
+        def break_aliases_pointing_to(name: str):
+            r = root(name)
+            kill = [k for k,v in alias.items() if root(v) == r or k == r]
+            for k in kill:
+                del alias[k]
+
+        out = []
+        for inst in instructions:
+            if inst.op in boundaries:
+                out.append(inst); reset(); continue
+
+            # Sustituir args por su raíz
+            a1, a2 = inst.arg1, inst.arg2
+            if a1 is not None and not _is_const(a1): a1 = TACOperand(root(str(a1)))
+            if a2 is not None and not _is_const(a2): a2 = TACOperand(root(str(a2)))
+            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+
+            # Si esta instrucción **reescribe** un nombre, rompe alias que apunten a él
+            if new_inst.result is not None:
+                break_aliases_pointing_to(str(new_inst.result))
+
+            # Registrar alias sólo para ASSIGN con fuente no-const
+            if new_inst.op == TACOp.ASSIGN and new_inst.arg1 is not None and not _is_const(new_inst.arg1):
+                alias[str(new_inst.result)] = root(str(new_inst.arg1))
+            out.append(new_inst)
+        return out
+
     
     # -------- helpers de valor ----------
     def _is_constant(self, operand: Optional[TACOperand]) -> bool:
