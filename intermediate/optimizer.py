@@ -35,11 +35,13 @@ class TACOptimizer:
         instructions = self.constant_propagation(instructions)
         instructions = self.constant_folding(instructions)
         instructions = self.copy_propagation(instructions)
-        instructions = self.constant_propagation(instructions)  # <- extra
-        instructions = self.constant_folding(instructions)      # <- extra
+        instructions = self.constant_propagation(instructions)
+        instructions = self.constant_folding(instructions)
         instructions = self.algebraic_simplification(instructions)
+        instructions = self.dead_code_elimination(instructions)  # ← agrega este
         instructions = self.remove_redundant_moves(instructions)
         instructions = self.remove_redundant_jumps(instructions)
+
 
 
         out = TACProgram()
