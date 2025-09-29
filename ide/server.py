@@ -8,7 +8,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
-
+from intermediate.runner import generate_intermediate_code
+from intermediate.optimizer import TACOptimizer
 # -------------------------------------------------------------------
 # Rutas / imports
 # -------------------------------------------------------------------
@@ -137,9 +138,6 @@ def analyze(body: AnalyzeBody):
         tac_payload = None
         if ok and body.generate_tac:
             try:
-                from intermediate.runner import generate_intermediate_code
-                from intermediate.optimizer import TACOptimizer
-                
                 tac_result = generate_intermediate_code(tree)
                 
                 if not tac_result.has_errors:
