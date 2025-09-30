@@ -55,6 +55,15 @@ CompiscriptLexer.py  CompiscriptParser.py  CompiscriptVisitor.py  (y .interp/.to
 python -m program.Driver program/program.cps
 ```
 
+# TAC “normal”
+```bash
+python -m intermediate.tac_driver program/program.cps --format tac -v
+```
+# TAC numerado (útil para depurar)
+```bash
+python -m intermediate.tac_driver program/program.cps --format debug -v
+```
+
 * Si no hay errores → no imprime nada.
 * Si hay errores → imprime `[EXXX] (línea:col) mensaje` y retorna `!= 0`.
 
@@ -93,6 +102,14 @@ Cómo funciona:
 
 ---
 
+### 3.1) Ver TAC y optimizar desde el IDE
+
+Marca la casilla TAC para ver el código intermedio.
+
+Marca Optimizar para aplicar el optimizador local.
+
+El backend usa intermediate.runner.generate_intermediate_code y (si pides optimizar) intermediate.optimizer.TACOptimizer.
+
 ## 4) Suite de tests
 
 Coloca tus casos en:
@@ -127,6 +144,13 @@ Criterio:
 ├── ide/
 │   ├── server.py
 │   └── static/ (index.html, main.js)
+intermediate/
+|  ├── tac.py             # IR: TACOp, TACOperand, TACInstruction, TACProgram
+|  ├── tac_generator.py   # Visitor que recorre el AST y emite TAC
+|  ├── optimizer.py       # Optimizaciones locales (folding, copy-prop, etc.)
+|  ├── tac_driver.py      # CLI para generar TAC desde .cps
+|  ├── runner.py          # Helper para integrarlo con el IDE/servidor
+
 ├── program/
 │   ├── Compiscript.g4        # gramática ANTLR
 │   ├── program.cps           # ejemplo
@@ -145,6 +169,55 @@ Criterio:
 ```
 
 ---
+## 5.1) Especificación del Lenguaje Intermedio (TAC)
+
+Instrucción: formato cuadrúplo op result, arg1, arg2 (o variantes: PRINT arg1, GOTO Lx, LABEL Lx, PARAM arg1, CALL f, n).
+
+Conjunto de ops (principales):
+ASSIGN, ADD, SUB, MUL, DIV, MOD, NEG, NOT, LT, LE, GT, GE, EQ, NE,
+GOTO, IF_TRUE, IF_FALSE, LABEL, PRINT,
+PARAM, CALL, RETURN,
+NEW, ARRAY_ACCESS, ARRAY_ASSIGN, FIELD_ACCESS, FIELD_ASSIGN,
+FUNC_START, FUNC_END.
+
+Temporales y etiquetas: generados por TACProgram.new_temp() / new_label() con reciclaje de temporales vía free_temp.
+
+Bajos supuestos de representación:
+
+Arrays: NEW t, size crea arreglo; t[i]/t[i] = v → ARRAY_ACCESS/ARRAY_ASSIGN.
+
+Objetos/clases: FIELD_ACCESS t, obj, "x" y FIELD_ASSIGN obj, "x", v.
+
+Llamadas: PARAM arg* seguido de CALL f, n (el resultado, si existe, va a un temporal).
+
+Control de flujo: if, while, do-while, for, switch se traducen a LABEL/IF_*/GOTO.
+
+Mini ejemplo: 
+```bash
+let x: integer = 2 + 3;
+let y: integer = x * 4;
+if ((x == 5) && (y != 0)) { print("then"); } else { print("else"); }
+
+
+0000: t1 = 2 add 3
+0001: x = t1
+0002: t1 = x mul 4
+0003: y = t1
+0004: t1 = x == 5
+0005: ifFalse t1 goto L0
+0006: t1 = y != 0
+0007: t2 = t1
+0008: goto L1
+0009: L0:
+0010: t2 = false
+0011: L1:
+0012: ifFalse t2 goto L2
+0013: print "then"
+0014: goto L3
+0015: L2:
+0016: print "else"
+0017: L3:
+```
 
 ## 6) ¿Qué valida el analizador?
 
@@ -241,4 +314,26 @@ Criterio:
 
 Incluye tipos primitivos (`integer`, `string`, `boolean`, `null`), arreglos `T[]`, funciones con parámetros tipados y retorno, clases con constructor y métodos, `this`, herencia, control de flujo (`if/else`, `while`, `do-while`, `for`, `foreach`, `break/continue`, `return`), `switch/case`, `try/catch`, operadores aritméticos/lógicos y ternario.
 
+## 10) Optimizaciones implementadas
+
+Alcance: intra-bloque (sin CFG).
+Pases:
+
+Constant Folding (aritmética, relacionales, !, - y IF_* con condición constante → GOTO/eliminación).
+
+Constant Propagation (intra-bloque; respeta límites en LABEL/GOTO/IF_*/CALL/RETURN/PARAM/ARRAY_/FIELD_).
+
+Copy Propagation (intra-bloque; corta alias al reescribir la fuente).
+
+Algebraic Simplification (x+0, x-0, x*1, x*0, x/1).
+
+Remove Redundant Moves (x=x) y Jumps (goto al LABEL inmediato; labels huérfanas).
+
+Limitaciones (intencionadas en esta fase):
+
+No hay CFG aún → no se hace propagación/opt global entre bloques; no se colapsan ramas que dependen de múltiples caminos.
+
+try/catch simplificado; sin efectos de excepción reales.
+
+No hay asignación de registros ni código máquina (eso es la siguiente fase).
 > Los archivos fuente usan extensión **`.cps`**.
