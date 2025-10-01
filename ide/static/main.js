@@ -312,18 +312,54 @@ function renderSymbol(s) {
   const kind = `<span class="sym-kind">${escapeHtml(s?.kind || '')}</span>`;
   const name = `<span class="sym-name">${escapeHtml(s?.name || '(anon)')}</span>`;
 
+  // Construir parámetros CON OFFSETS
   const params = (Array.isArray(s?.params) && s.params.length)
-    ? '(' + s.params.map(p =>
-        `${escapeHtml(p?.name || '')}: <span class="sym-type">${escapeHtml(p?.type || '')}</span>`
-      ).join(', ') + ')'
+    ? '(' + s.params.map(p => {
+        let pstr = `${escapeHtml(p?.name || '')}: <span class="sym-type">${escapeHtml(p?.type || '')}</span>`;
+        // Mostrar offset del parámetro
+        if (p?.offset !== null && p?.offset !== undefined) {
+          pstr += ` <span style="color: #f6c85f; font-size: 10px;">[offset=${p.offset}]</span>`;
+        }
+        return pstr;
+      }).join(', ') + ')'
     : '';
 
   const type = (s?.return_type)
     ? `: <span class="sym-type">${escapeHtml(s.return_type)}</span>`
     : (s?.type ? `: <span class="sym-type">${escapeHtml(s.type)}</span>` : '');
 
-  let html = `<li>${kind} <code class="inline">${name}${params}${type}</code></li>`;
+  let html = `<li>${kind} <code class="inline">${name}${params}${type}`;
 
+  // OFFSET para variables
+  if (s?.offset !== null && s?.offset !== undefined) {
+    html += ` <span style="color: #4cc9f0; font-size: 10px; font-weight: bold;">[offset=${s.offset}]</span>`;
+  }
+
+  // LABEL para funciones
+  if (s?.label) {
+    html += ` <span style="color: #00e5a8; font-size: 10px; font-weight: bold;">[${escapeHtml(s.label)}]</span>`;
+  }
+
+  html += `</code>`;
+
+  // REGISTRO DE ACTIVACIÓN para funciones
+  // Los campos están directamente en 's', no en 's.activation_record'
+  if (s?.frame_size !== null && s?.frame_size !== undefined && s?.frame_size > 0) {
+    html += `<br/><span style="margin-left: 20px; font-size: 11px; color: var(--muted);">`;
+    html += `📦 Frame: ${s.frame_size}B (params: ${s.params_size || 0}B, locals: ${s.locals_size || 0}B)`;
+    html += `</span>`;
+  }
+
+  // TAMAÑO DE INSTANCIA para clases
+  if (s?.instance_size !== null && s?.instance_size !== undefined && s?.instance_size > 0) {
+    html += `<br/><span style="margin-left: 20px; font-size: 11px; color: var(--muted);">`;
+    html += `📏 Instance: ${s.instance_size} bytes`;
+    html += `</span>`;
+  }
+
+  html += `</li>`;
+
+  // Fields
   if (Array.isArray(s?.fields) && s.fields.length) {
     html += `<ul class="sym-list nested">` +
       s.fields.map(f =>
@@ -334,6 +370,7 @@ function renderSymbol(s) {
       `</ul>`;
   }
 
+  // Methods
   if (Array.isArray(s?.methods) && s.methods.length) {
     html += `<ul class="sym-list nested">` +
       s.methods.map(m => {
@@ -372,6 +409,25 @@ function renderSymbols(root) {
     el.innerHTML = '<div class="muted">Sin tabla de símbolos disponible.</div>';
     return;
   }
+  
+  // DEBUG: Ver qué datos llegan
+  console.log("=== DATOS RECIBIDOS ===");
+  console.log("Root completo:", root);
+  if (root.symbols) {
+    root.symbols.forEach(s => {
+      console.log(`\nSímbolo: ${s.name} (${s.kind})`);
+      console.log("  offset:", s.offset);
+      console.log("  label:", s.label);
+      console.log("  activation_record:", s.activation_record);
+      if (s.params) {
+        s.params.forEach(p => {
+          console.log(`  param ${p.name}: offset=${p.offset}`);
+        });
+      }
+    });
+  }
+  console.log("=======================");
+  
   el.innerHTML = renderScope(root);
 }
 

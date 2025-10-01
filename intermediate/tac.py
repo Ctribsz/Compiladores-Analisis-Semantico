@@ -55,6 +55,18 @@ class TACOp(Enum):
     # I/O
     PRINT = "PRINT"
 
+    # Gestión de stack frame
+    ENTER = "ENTER"
+    LEAVE = "LEAVE"
+    
+    # Stack operations
+    PUSH = "PUSH"
+    POP = "POP"
+    
+    # Memory dereferencing
+    DEREF = "DEREF"
+    ADD_SP = "ADD_SP"
+
 @dataclass
 class TACOperand:
     """Operando en TAC: puede ser temporal, variable, constante o etiqueta"""
@@ -116,6 +128,22 @@ class TACInstruction:
             return f"function {self.arg1}:"
         elif self.op == TACOp.FUNC_END:
             return f"end_function {self.arg1}"
+        
+        # ========== NUEVAS OPERACIONES ==========
+        elif self.op == TACOp.ENTER:
+            return f"enter {self.arg1}"
+        elif self.op == TACOp.LEAVE:
+            return "leave"
+        elif self.op == TACOp.PUSH:
+            return f"push {self.arg1}"
+        elif self.op == TACOp.POP:
+            return f"pop {self.result}"
+        elif self.op == TACOp.DEREF:
+            return f"{self.result} = @{self.arg1}"
+        elif self.op == TACOp.ADD_SP:
+            return f"SP = SP + {self.arg1}"
+        # =========================================
+        
         elif self.op == TACOp.PARAM:
             return f"param {self.arg1}"
         elif self.op == TACOp.CALL:

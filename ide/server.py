@@ -134,6 +134,17 @@ def analyze(body: AnalyzeBody):
         global_scope = getattr(sem, "global_scope", None) or getattr(sem, "scope", None)
         symbols_payload = serialize_scope(global_scope) if global_scope is not None else None
 
+        # 3b) Tabla de símbolos
+        global_scope = getattr(sem, "global_scope", None) or getattr(sem, "scope", None)
+        symbols_payload = serialize_scope(global_scope) if global_scope is not None else None
+        
+        # ====== DEBUG: Ver qué se está serializando ======
+        if symbols_payload:
+            print("\n=== SERIALIZED SYMBOLS ===")
+            import json
+            print(json.dumps(symbols_payload, indent=2))
+            print("==========================\n")
+            
         # 4) Generación de TAC si se solicita y no hay errores
         tac_payload = None
         if ok and body.generate_tac:

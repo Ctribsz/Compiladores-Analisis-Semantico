@@ -23,19 +23,17 @@ class TACGenerator(CompiscriptVisitor):
         self.scopes_by_ctx = scopes_by_ctx
         
         # Stack para manejar break/continue
-        self.loop_stack = []  # Stack de (continue_label, break_label)
-        
-        # Para manejar funciones actuales
+        self.loop_stack = []
         self.current_function = None
-        
-        # Para manejar switch (end_label para break)
         self.switch_stack = []
-
-        # Para manejar clases
         self.current_class = None
-        self.class_symbols = {}  # nombre_clase -> ClassSymbol
+        self.class_symbols = {}
         
-        # Recopilar todas las clases del scope global
+        # NUEVO: Gestión de memoria y funciones
+        self.next_global_addr = 0x1000  # ← FALTA ESTO
+        self.global_addrs = {}           # ← FALTA ESTO
+        self.in_function = False         # ← FALTA ESTO
+        
         self._collect_classes()
     
     def _collect_classes(self):
@@ -98,15 +96,29 @@ class TACGenerator(CompiscriptVisitor):
     
     # ========== DECLARATIONS ==========
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
-        """Declara una variable"""
+        """Declara una variable usando direcciones de memoria o FP+offset"""
         var_name = self._id(ctx)
+        sym = self.current_scope.resolve(var_name)
         
         if ctx.initializer():
-            # Variable con inicialización
             init_value = self.visit(ctx.initializer())
-            var_op = self._make_variable(var_name)
-            self.program.emit(TACOp.ASSIGN, var_op, init_value)
-            # RHS consumido
+            
+            # Determinar si es global o local
+            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
+                # Variable local: usar FP[offset]
+                fp_ref = TACOperand(f"FP[{sym.offset}]")
+                # CORRECTO: result, arg1, arg2
+                self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=init_value)
+            else:
+                # Variable global: asignar dirección de memoria
+                if var_name not in self.global_addrs:
+                    self.global_addrs[var_name] = hex(self.next_global_addr)
+                    self.next_global_addr += 4
+                
+                addr_op = TACOperand(self.global_addrs[var_name])
+                # CORRECTO: result, arg1, arg2
+                self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=init_value)
+            
             self._free_if_temp(init_value)
         
         return None
@@ -398,31 +410,60 @@ class TACGenerator(CompiscriptVisitor):
     
     # ========== FUNCTIONS ==========
     def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
-        """Genera código para declaración de función"""
-        func_name = self._id(ctx)
-        self.current_function = func_name
+        fname = self._id(ctx)
+        self.current_function = fname
+        self.in_function = True
+        
+        # CAMBIO: Buscar el símbolo en el scope ACTUAL (puede ser clase o global)
+        # Primero intentar en el scope padre actual
+        fsym = None
+        if self.current_scope.parent:
+            fsym = self.current_scope.parent.resolve(fname)
+        
+        # Si no se encuentra y estamos en una clase, buscar en el scope de la clase
+        if not fsym and self.current_class:
+            # Buscar el ClassSymbol
+            class_sym = self.global_scope.resolve(self.current_class)
+            if class_sym and hasattr(class_sym, "_ctx"):
+                class_ctx = class_sym._ctx
+                if class_ctx in self.scopes_by_ctx:
+                    class_scope = self.scopes_by_ctx[class_ctx]
+                    fsym = class_scope.resolve(fname)
+        
+        # Si aún no se encuentra, buscar en global
+        if not fsym:
+            fsym = self.global_scope.resolve(fname)
+        
+        frame_size = getattr(fsym, 'frame_size', 0) if fsym else 0
+        
+        print(f"DEBUG: Función {fname}, fsym={fsym}, frame_size={frame_size}")
+        if fsym:
+            print(f"  params_size={getattr(fsym, 'params_size', 'NO TIENE')}")
+            print(f"  locals_size={getattr(fsym, 'locals_size', 'NO TIENE')}")
+            print(f"  frame_size={getattr(fsym, 'frame_size', 'NO TIENE')}")
         
         # Emitir inicio de función
-        func_op = self._make_variable(func_name)
+        func_op = self._make_variable(fname)
         self.program.emit(TACOp.FUNC_START, arg1=func_op)
+        
+        # Emitir ENTER con tamaño del frame
+        self.program.emit(TACOp.ENTER, arg1=self._make_constant(frame_size))
         
         # Entrar al scope de la función
         self._enter_scope(ctx)
         
-        # Parámetros (ya están en el scope como variables)
-        if ctx.parameters():
-            for param in ctx.parameters().parameter():
-                _ = self._id(param)
-                # Los parámetros ya están definidos en el scope
-        
         # Cuerpo de la función
         self.visit(ctx.block())
+        
+        # Emitir LEAVE antes de finalizar
+        self.program.emit(TACOp.LEAVE)
         
         # Emitir fin de función
         self.program.emit(TACOp.FUNC_END, arg1=func_op)
         
         self._exit_scope()
         self.current_function = None
+        self.in_function = False
         return None
     
     # ========== CLASSES ==========
@@ -754,8 +795,33 @@ class TACGenerator(CompiscriptVisitor):
         return base
     
     def visitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
-        """Visita un identificador"""
-        name = self._id(ctx)
+        """Visita un identificador usando FP[offset] si está en función"""
+        name = ctx.Identifier().getText()
+        sym = self.current_scope.resolve(name)
+        
+        if not sym:
+            return self._make_variable(name)
+        
+        # Si estamos en función y tiene offset: usar FP[offset]
+        if self.in_function and hasattr(sym, 'offset') and sym.offset is not None:
+            offset = sym.offset
+            fp_ref = TACOperand(f"FP[{offset}]")
+            
+            # Cargar valor desde FP[offset]
+            temp = self.program.new_temp()
+            # CORRECTO: result, arg1
+            self.program.emit(TACOp.DEREF, result=temp, arg1=fp_ref)
+            return temp
+        
+        # Variable global: usar dirección de memoria si existe
+        if name in self.global_addrs:
+            addr_op = TACOperand(self.global_addrs[name])
+            temp = self.program.new_temp()
+            # CORRECTO: result, arg1
+            self.program.emit(TACOp.DEREF, result=temp, arg1=addr_op)
+            return temp
+        
+        # Fallback: referencia directa
         return self._make_variable(name)
     
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
@@ -808,23 +874,32 @@ class TACGenerator(CompiscriptVisitor):
         return base
     
     def _apply_call(self, func: TACOperand, call_ctx) -> TACOperand:
-        """Aplica una llamada de función"""
-        # Pasar argumentos
-        num_args = 0
-        args_vals: List[TACOperand] = []
+        """Aplica una llamada de función con PUSH/POP"""
+        # Evaluar y hacer PUSH de argumentos (en orden inverso)
+        args_vals = []
         if call_ctx.arguments():
-            for expr in call_ctx.arguments().expression():
-                arg = self.visit(expr)
-                self.program.emit(TACOp.PARAM, arg1=arg)
-                args_vals.append(arg)
-                num_args += 1
+            args_vals = [self.visit(expr) for expr in call_ctx.arguments().expression()]
         
-        # Llamar función
-        result = self.program.new_temp()
+        # PUSH argumentos en orden inverso (convención de stack)
+        for arg in reversed(args_vals):
+            self.program.emit(TACOp.PUSH, arg1=arg)
+        
+        num_args = len(args_vals)
+        
+        # Llamar función - CORRECCIÓN AQUÍ
         num_args_op = self._make_constant(num_args)
-        self.program.emit(TACOp.CALL, result, func, num_args_op)
-
-        # liberar args temporales
+        self.program.emit(TACOp.CALL, arg1=func, arg2=num_args_op)  # ← func primero, luego num_args
+        
+        # Ajustar stack pointer después de llamada
+        if num_args > 0:
+            bytes_to_pop = num_args * 4
+            self.program.emit(TACOp.ADD_SP, arg1=self._make_constant(bytes_to_pop))
+        
+        # POP resultado
+        result = self.program.new_temp()
+        self.program.emit(TACOp.POP, result=result)
+        
+        # Liberar args temporales
         self._free_if_temp(*args_vals)
         return result
     

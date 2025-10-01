@@ -75,7 +75,11 @@ class SymbolCollector(CompiscriptVisitor):
     def visitProgram(self, ctx):
         self._bind_scope(ctx, self.global_scope)
         r = self.visitChildren(ctx)
-        self._finalize_inheritance()   
+        self._finalize_inheritance()
+        
+        # NUEVO: Calcular offsets después de recolectar todos los símbolos
+        self._calculate_offsets()
+        
         return r
 
     # block: '{' statement* '}';
@@ -305,6 +309,158 @@ class SymbolCollector(CompiscriptVisitor):
         for cs in self.classes.values():
             if hasattr(cs, "_vis"): delattr(cs, "_vis")
 
+    # ============================================
+    # NUEVO: Métodos para calcular offsets y registros de activación
+    # ============================================
+    
+    def _calculate_offsets(self):
+        """Calcula offsets y tamaños para todos los símbolos"""
+        print("=== CALCULANDO OFFSETS ===")  # DEBUG
+        self._process_global_scope(self.global_scope)
+        
+        # DEBUG: Imprimir lo que calculamos
+        for name, sym in self.global_scope.symbols.items():
+            print(f"Símbolo: {name}")
+            print(f"  - offset: {getattr(sym, 'offset', 'NO TIENE')}")
+            if isinstance(sym, FunctionSymbol):
+                print(f"  - label: {getattr(sym, 'label', 'NO TIENE')}")
+                print(f"  - params_size: {getattr(sym, 'params_size', 0)}")
+                print(f"  - locals_size: {getattr(sym, 'locals_size', 0)}")
+                print(f"  - frame_size: {getattr(sym, 'frame_size', 0)}")
+                for p in (sym.params or []):
+                    print(f"    - param {p.name}: offset={getattr(p, 'offset', 'NO TIENE')}")
+        print("=== FIN CÁLCULO ===")
+        
+    def _process_global_scope(self, scope: Scope):
+        """Procesa el scope global asignando offsets a variables y procesando funciones"""
+        global_offset = 0
+        
+        for name, symbol in scope.symbols.items():
+            if isinstance(symbol, VariableSymbol):
+                # Variables globales: offsets positivos desde 0
+                symbol.offset = global_offset
+                global_offset += self._get_size(symbol.typ)
+            
+            elif isinstance(symbol, FunctionSymbol):
+                # Procesar función
+                self._process_function(symbol)
+            
+            elif isinstance(symbol, ClassSymbol):
+                # Procesar clase
+                self._process_class(symbol)
+                
+                # NUEVO: También procesar métodos de la clase
+                # Buscar el scope de la clase para procesar sus métodos
+                for ctx, scope_inner in self.scopes_by_ctx.items():
+                    if ctx in self.scopes_by_ctx and hasattr(ctx, 'Identifier'):
+                        try:
+                            if hasattr(ctx, 'classMember') and ctx.Identifier().getText() == name:
+                                # Procesar funciones en el scope de la clase
+                                for method_name, method_sym in scope_inner.symbols.items():
+                                    if isinstance(method_sym, FunctionSymbol):
+                                        self._process_function(method_sym)
+                        except:
+                            pass
+    
+    def _process_function(self, fsym: FunctionSymbol):
+        """Calcula offsets y tamaños para una función"""
+        # Asignar label a la función
+        fsym.label = f"L_{fsym.name}"
+        
+        # Calcular offsets para parámetros (negativos, antes del frame)
+        param_offset = -4  # Empezar en -4 (después del return address)
+        for param in (fsym.params or []):
+            param.offset = param_offset
+            param_offset -= self._get_size(param.typ)
+        
+        # Tamaño total de parámetros
+        fsym.params_size = abs(param_offset) - 4
+        
+        # Buscar el scope de la función para calcular locals
+        func_scope = self._find_function_scope(fsym.name)
+        if func_scope:
+            fsym.locals_size = self._calculate_locals_in_scope(func_scope)
+        else:
+            fsym.locals_size = 0
+        
+        # Frame size = params + locals + overhead (12 bytes: return, old FP, static link)
+        fsym.frame_size = fsym.params_size + fsym.locals_size + 12
+        
+        # DEBUG: Imprimir para verificar
+        print(f"  Función {fsym.name}: params_size={fsym.params_size}, locals_size={fsym.locals_size}, frame_size={fsym.frame_size}")
+    
+    def _process_class(self, csym: ClassSymbol):
+        """Calcula tamaño de instancia para una clase y procesa sus métodos"""
+        field_offset = 0
+        
+        # Calcular tamaño sumando todos los campos
+        for field_name, field_type in (csym.fields or {}).items():
+            field_offset += self._get_size(field_type)
+        
+        csym.instance_size = field_offset
+        
+        # Los métodos están como FunctionSymbol en el scope de la clase
+        # Necesitamos encontrar ese scope
+        class_ctx = getattr(csym, "_ctx", None)
+        if class_ctx and class_ctx in self.scopes_by_ctx:
+            class_scope = self.scopes_by_ctx[class_ctx]
+            
+            # Buscar FunctionSymbols en el scope de la clase
+            for name, symbol in class_scope.symbols.items():
+                if isinstance(symbol, FunctionSymbol):
+                    # Procesar cada método como una función
+                    self._process_function(symbol)
+    
+    def _calculate_locals_in_scope(self, scope: Scope, base_offset: int = 0) -> int:
+        """
+        Calcula el tamaño total de variables locales en un scope
+        y asigna offsets a cada variable local
+        """
+        local_offset = base_offset
+        
+        for name, symbol in scope.symbols.items():
+            if isinstance(symbol, VariableSymbol):
+                # Asignar offset a la variable local
+                symbol.offset = local_offset
+                local_offset += self._get_size(symbol.typ)
+        
+        return local_offset - base_offset
+    
+    def _find_function_scope(self, func_name: str) -> Optional[Scope]:
+        """Busca el scope interno de una función por su nombre"""
+        for ctx, scope in self.scopes_by_ctx.items():
+            # Verificar si es un contexto de función
+            if hasattr(ctx, 'Identifier'):
+                try:
+                    ctx_id = ctx.Identifier()
+                    if ctx_id and ctx_id.getText() == func_name:
+                        # Este es el contexto de la función, buscar su scope interno (el bloque)
+                        if hasattr(ctx, 'block'):
+                            block_ctx = ctx.block()
+                            if block_ctx in self.scopes_by_ctx:
+                                return self.scopes_by_ctx[block_ctx]
+                except:
+                    pass
+        return None
+    
+    def _get_size(self, typ: Type) -> int:
+        """
+        Retorna el tamaño en bytes de un tipo
+        Convención: 4 bytes para primitivos, 8 para referencias
+        """
+        if typ == INTEGER or typ == BOOLEAN:
+            return 4
+        elif typ == STRING:
+            return 8  # Puntero a string
+        elif isinstance(typ, ArrayType):
+            return 8  # Puntero a array
+        elif isinstance(typ, ClassType):
+            return 8  # Puntero a instancia
+        elif isinstance(typ, FunctionType):
+            return 8  # Puntero a función
+        else:
+            return 4  # Default
+        
 # =============================
 # PASS 2: Chequeo de tipos/uso
 # =============================

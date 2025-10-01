@@ -6,6 +6,7 @@ from .types import Type
 class Symbol:
     name: str
     typ: Type
+    offset: Optional[int] = None  # ← NUEVO
 
 @dataclass
 class VariableSymbol(Symbol):
@@ -14,10 +15,15 @@ class VariableSymbol(Symbol):
 
 @dataclass
 class FunctionSymbol(Symbol):
-    params: List[Symbol] = None  # symbols de parámetros
+    params: List[Symbol] = None
+    label: Optional[str] = None      # ← NUEVO
+    params_size: int = 0             # ← NUEVO
+    locals_size: int = 0             # ← NUEVO
+    frame_size: int = 0              # ← NUEVO
 
 @dataclass
 class ClassSymbol(Symbol):
     base: Optional["ClassSymbol"] = None
     fields: dict = None
     methods: dict = None
+    instance_size: int = 0           
