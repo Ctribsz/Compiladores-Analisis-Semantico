@@ -145,81 +145,73 @@ class TACGenerator(CompiscriptVisitor):
         self._exit_scope()
         return None
     
+
     def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
         """Maneja asignaciones"""
         if len(ctx.expression()) == 1:
             # Asignación simple: id = expr
-            # Regla esperada: Identifier '=' expression
             var_name = self._id(ctx)
-            value    = self.visit(ctx.expression(0))
-            var_op   = self._make_variable(var_name)
-            self.program.emit(TACOp.ASSIGN, var_op, value)
-            # RHS consumido
+            value = self.visit(ctx.expression(0))
+            
+            # AGREGAR ESTA LÓGICA:
+            sym = self.current_scope.resolve(var_name)
+            
+            # Si es función y tiene offset: usar FP[offset]
+            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
+                fp_ref = TACOperand(f"FP[{sym.offset}]")
+                self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=value)
+            # Si es variable global: usar dirección
+            elif var_name in self.global_addrs:
+                addr_op = TACOperand(self.global_addrs[var_name])
+                self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=value)
+            # Fallback: nombre directo (para casos especiales como 'this')
+            else:
+                var_op = self._make_variable(var_name)
+                self.program.emit(TACOp.ASSIGN, result=var_op, arg1=value)
+            
             self._free_if_temp(value)
         else:
-            # Asignación a propiedad: expr '.' Identifier '=' expression
-            obj       = self.visit(ctx.expression(0))
+            # Asignación a propiedad (sin cambios)
+            obj = self.visit(ctx.expression(0))
             prop_name = self._id(ctx)
-            value     = self.visit(ctx.expression(1))
-            prop_op   = self._make_constant(prop_name)
+            value = self.visit(ctx.expression(1))
+            prop_op = self._make_constant(prop_name)
             self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
-            # RHS consumido
             self._free_if_temp(value)
         return None
-    
-    def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
-        """Visita una expresión como statement"""
-        self.visit(ctx.expression())
-        return None
-    
-    def visitPrintStatement(self, ctx: CompiscriptParser.PrintStatementContext):
-        """Genera código para print"""
-        value = self.visit(ctx.expression())
-        self.program.emit(TACOp.PRINT, arg1=value)
-        self._free_if_temp(value)
-        return None
-    
-    # ========== CONTROL FLOW ==========
-    def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
-        """Genera código para if-else"""
-        cond = self.visit(ctx.expression())
-        
-        else_label = self.program.new_label()
-        end_label = self.program.new_label()
-        
-        # Si la condición es falsa, saltar al else (o al final si no hay else)
-        if ctx.block(1):  # Hay else
-            self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=else_label)
-            self.visit(ctx.block(0))  # Then block
-            self.program.emit(TACOp.GOTO, arg1=end_label)
-            self.program.emit_label(else_label)
-            self.visit(ctx.block(1))  # Else block
-            self.program.emit_label(end_label)
-        else:  # No hay else
-            self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=end_label)
-            self.visit(ctx.block(0))  # Then block
-            self.program.emit_label(end_label)
-        
-        self._free_if_temp(cond)
-        return None
-    
-    def visitWhileStatement(self, ctx: CompiscriptParser.WhileStatementContext):
-        """Genera código para while"""
-        start_label = self.program.new_label()
-        continue_label = start_label  # continue va al inicio del loop
-        end_label = self.program.new_label()
-        
-        self.loop_stack.append((continue_label, end_label))
-        
-        self.program.emit_label(start_label)
-        cond = self.visit(ctx.expression())
-        self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=end_label)
-        self.visit(ctx.block())
-        self.program.emit(TACOp.GOTO, arg1=start_label)
-        self.program.emit_label(end_label)
-        
-        self.loop_stack.pop()
-        self._free_if_temp(cond)
+
+    def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
+        """Maneja asignaciones"""
+        if len(ctx.expression()) == 1:
+            # Asignación simple: id = expr
+            var_name = self._id(ctx)
+            value = self.visit(ctx.expression(0))
+            
+            # AGREGAR ESTA LÓGICA:
+            sym = self.current_scope.resolve(var_name)
+            
+            # Si es función y tiene offset: usar FP[offset]
+            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
+                fp_ref = TACOperand(f"FP[{sym.offset}]")
+                self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=value)
+            # Si es variable global: usar dirección
+            elif var_name in self.global_addrs:
+                addr_op = TACOperand(self.global_addrs[var_name])
+                self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=value)
+            # Fallback: nombre directo (para casos especiales como 'this')
+            else:
+                var_op = self._make_variable(var_name)
+                self.program.emit(TACOp.ASSIGN, result=var_op, arg1=value)
+            
+            self._free_if_temp(value)
+        else:
+            # Asignación a propiedad (sin cambios)
+            obj = self.visit(ctx.expression(0))
+            prop_name = self._id(ctx)
+            value = self.visit(ctx.expression(1))
+            prop_op = self._make_constant(prop_name)
+            self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
+            self._free_if_temp(value)
         return None
     
     def visitDoWhileStatement(self, ctx: CompiscriptParser.DoWhileStatementContext):
@@ -414,7 +406,6 @@ class TACGenerator(CompiscriptVisitor):
         self.current_function = fname
         self.in_function = True
         
-        # CAMBIO: Buscar el símbolo en el scope ACTUAL (puede ser clase o global)
         # Primero intentar en el scope padre actual
         fsym = None
         if self.current_scope.parent:
@@ -839,7 +830,7 @@ class TACGenerator(CompiscriptVisitor):
             arg_values: List[TACOperand] = []
             for expr in ctx.arguments().expression():
                 arg = self.visit(expr)
-                self.program.emit(TACOp.PARAM, arg1=arg)
+                self.program.emit(TACOp.PUSH, arg1=arg)
                 arg_values.append(arg)
             
             # Llamar constructor
