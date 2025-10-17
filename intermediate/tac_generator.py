@@ -75,10 +75,16 @@ class TACGenerator(CompiscriptVisitor):
         return isinstance(name, (str, TACOperand)) and str(name).startswith("t")
 
     def _free_if_temp(self, *names: Any):
+        """Libera temporales si son temporales (empiezan con 't')"""
         for n in names:
-            # Si es TACOperand, su valor string está en n.value
+            if n is None:
+                continue
+            
+            # Extraer el string
             s = str(n.value) if isinstance(n, TACOperand) else str(n)
-            if s and s.startswith("t"):
+            
+            # Solo liberar si es temporal (empieza con 't' y es solo número después)
+            if s and s.startswith("t") and len(s) > 1 and s[1:].isdigit():
                 self.program.free_temp(s)
     # ----------------------------------------------------------
     
@@ -179,40 +185,6 @@ class TACGenerator(CompiscriptVisitor):
             self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
             self._free_if_temp(value)
         return None
-
-    def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
-        """Maneja asignaciones"""
-        if len(ctx.expression()) == 1:
-            # Asignación simple: id = expr
-            var_name = self._id(ctx)
-            value = self.visit(ctx.expression(0))
-            
-            # AGREGAR ESTA LÓGICA:
-            sym = self.current_scope.resolve(var_name)
-            
-            # Si es función y tiene offset: usar FP[offset]
-            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
-                fp_ref = TACOperand(f"FP[{sym.offset}]")
-                self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=value)
-            # Si es variable global: usar dirección
-            elif var_name in self.global_addrs:
-                addr_op = TACOperand(self.global_addrs[var_name])
-                self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=value)
-            # Fallback: nombre directo (para casos especiales como 'this')
-            else:
-                var_op = self._make_variable(var_name)
-                self.program.emit(TACOp.ASSIGN, result=var_op, arg1=value)
-            
-            self._free_if_temp(value)
-        else:
-            # Asignación a propiedad (sin cambios)
-            obj = self.visit(ctx.expression(0))
-            prop_name = self._id(ctx)
-            value = self.visit(ctx.expression(1))
-            prop_op = self._make_constant(prop_name)
-            self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
-            self._free_if_temp(value)
-        return None
     
     def visitDoWhileStatement(self, ctx: CompiscriptParser.DoWhileStatementContext):
         """Genera código para do-while"""
@@ -230,7 +202,7 @@ class TACGenerator(CompiscriptVisitor):
         self.program.emit_label(end_label)
         
         self.loop_stack.pop()
-        self._free_if_temp(cond)
+        self._free_if_temp(cond)  # Liberar al final
         return None
     
     def visitForStatement(self, ctx: CompiscriptParser.ForStatementContext):
@@ -263,15 +235,20 @@ class TACGenerator(CompiscriptVisitor):
         self.program.emit_label(continue_label)
         
         # Update
+        update = None
         if len(exprs) >= 2:
-            self.visit(exprs[1])
+            update = self.visit(exprs[1])
         
         self.program.emit(TACOp.GOTO, arg1=start_label)
         self.program.emit_label(end_label)
         
         self.loop_stack.pop()
+        
+        # Liberar al final del loop
         if cond is not None:
             self._free_if_temp(cond)
+        if update is not None:
+            self._free_if_temp(update)
         return None
     
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
@@ -521,7 +498,6 @@ class TACGenerator(CompiscriptVisitor):
     def visitTernaryExpr(self, ctx: CompiscriptParser.TernaryExprContext):
         """Genera código para operador ternario"""
         if len(ctx.expression()) == 0:
-            # No hay ternario, solo logical or
             return self.visit(ctx.logicalOrExpr())
         
         # cond ? expr1 : expr2
@@ -544,6 +520,8 @@ class TACGenerator(CompiscriptVisitor):
         self.program.emit(TACOp.ASSIGN, result, else_value)
         
         self.program.emit_label(end_label)
+        
+        # Liberar valores intermedios (pero NO result)
         self._free_if_temp(cond, then_value, else_value)
         return result
     
@@ -798,11 +776,15 @@ class TACGenerator(CompiscriptVisitor):
             offset = sym.offset
             fp_ref = TACOperand(f"FP[{offset}]")
             
-            # Cargar valor desde FP[offset]
-            temp = self.program.new_temp()
-            # CORRECTO: result, arg1
-            self.program.emit(TACOp.DEREF, result=temp, arg1=fp_ref)
-            return temp
+            # Parámetros (offset negativo) requieren cargar desde stack (DEREF),
+            # variables locales (offset >= 0) se referencian directamente sin DEREF.
+            if offset < 0:
+                temp = self.program.new_temp()
+                self.program.emit(TACOp.DEREF, result=temp, arg1=fp_ref)
+                return temp
+            else:
+                # Local: devolver referencia directa al frame
+                return fp_ref
         
         # Variable global: usar dirección de memoria si existe
         if name in self.global_addrs:
@@ -814,6 +796,61 @@ class TACGenerator(CompiscriptVisitor):
         
         # Fallback: referencia directa
         return self._make_variable(name)
+    
+    def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
+        """Genera TAC para if-else con etiquetas"""
+        # Evaluar condición
+        cond = self.visit(ctx.expression())
+        
+        # Crear etiquetas
+        else_label = self.program.new_label()   # L2
+        end_label = self.program.new_label()    # L3
+        
+        # Si la condición es falsa, ir al else (o al final si no hay else)
+        if ctx.block(1):  # Hay else
+            self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=TACOperand(else_label))
+        else:  # No hay else
+            self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=TACOperand(end_label))
+        
+        # Bloque then
+        self.visit(ctx.block(0))
+        
+        # Si hay else, saltar al final después del then
+        if ctx.block(1):
+            self.program.emit(TACOp.GOTO, arg1=TACOperand(end_label))
+            
+            # Etiqueta del else
+            self.program.emit_label(else_label)  # L2:
+            
+            # Bloque else
+            self.visit(ctx.block(1))
+        
+        # Etiqueta de fin
+        self.program.emit_label(end_label)       # L3:
+        
+        return None
+    
+    def visitWhileStatement(self, ctx: CompiscriptParser.WhileStatementContext):
+        """Genera código para while - SIN liberar temporales en el loop"""
+        start_label = self.program.new_label()
+        end_label = self.program.new_label()
+        
+        self.loop_stack.append((start_label, end_label))
+        
+        self.program.emit_label(start_label)
+        cond = self.visit(ctx.expression())
+        self.program.emit(TACOp.IF_FALSE, arg1=cond, arg2=end_label)
+        
+        # NO liberar cond aquí - se necesita en cada iteración
+        
+        self.visit(ctx.block())
+        self.program.emit(TACOp.GOTO, arg1=start_label)
+        self.program.emit_label(end_label)
+        
+        self.loop_stack.pop()
+        # Ahora sí podemos liberar (loop terminado)
+        self._free_if_temp(cond)
+        return None
     
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         """Genera código para new"""

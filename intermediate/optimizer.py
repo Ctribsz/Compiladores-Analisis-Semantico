@@ -1,6 +1,6 @@
 """
 Optimizador de código intermedio TAC
-Implementa optimizaciones locales básicas (robustas a strings/labels)
+Implementa optimizaciones locales básicas + optimizaciones quirúrgicas avanzadas
 """
 from typing import List, Set, Dict, Optional
 from dataclasses import dataclass
@@ -8,17 +8,23 @@ from .tac import TACOp, TACOperand, TACInstruction, TACProgram
 
 # --------- helpers seguros ---------
 def _is_const(x) -> bool:
-    # True sólo si es TACOperand con bandera is_constant
     return getattr(x, "is_constant", False)
 
 def _const_val(x):
-    # Si es TACOperand, devuelve .value; si no, lo retorna tal cual (str/int/bool/None)
     return getattr(x, "value", x)
 
 def _is_temp_name(x) -> bool:
     s = str(_const_val(x))
-    return isinstance(s, str) and s.startswith("t")
+    return isinstance(s, str) and s.startswith("t") and len(s) > 1 and s[1:].isdigit()
 # -----------------------------------
+
+@dataclass
+class LivenessInfo:
+    """Información de vida de un temporal"""
+    first_def: int
+    last_use: int
+    uses: Set[int]
+    defs: Set[int]
 
 
 class TACOptimizer:
@@ -30,28 +36,594 @@ class TACOptimizer:
     
     def optimize(self) -> TACProgram:
         instructions = self.program.instructions.copy()
+        
+        # Validar y corregir TAC malformado
+        instructions = self.validate_tac(instructions)
 
+        # ========== FASE 1: Pase algebraico inicial ==========
+        print("📊 Fase 1: Constant folding y propagación...")
         instructions = self.constant_folding(instructions)
-        instructions = self.constant_propagation(instructions)
-        instructions = self.constant_folding(instructions)
-        instructions = self.copy_propagation(instructions)
+        instructions = self.enhanced_constant_folding(instructions)
         instructions = self.constant_propagation(instructions)
         instructions = self.constant_folding(instructions)
         instructions = self.algebraic_simplification(instructions)
-        instructions = self.dead_code_elimination(instructions)  # ← agrega este
+        
+        # ========== FASE 2: Optimizaciones quirúrgicas ==========
+        print("🔧 Fase 2: Optimizaciones quirúrgicas...")
+        original_count = len(instructions)
+        instructions = self._surgical_optimize(instructions)
+        surgical_count = len(instructions)
+        print(f"   Eliminadas {original_count - surgical_count} instrucciones redundantes")
+        
+        # ========== FASE 3: Limpieza y pases finales ==========
+        print("🧹 Fase 3: Limpieza final...")
+        instructions = self.copy_propagation(instructions)
+        # Nuevos pases de limpieza/afinado
+        instructions = self.constant_cleanup(instructions)
+        instructions = self.remove_unused_constant_loads(instructions)
+        instructions = self.optimize_memory_loads(instructions)
+        instructions = self.eliminate_copy_chains(instructions)
+        instructions = self.remove_redundant_stores(instructions)
+        instructions = self.dead_code_elimination(instructions)
         instructions = self.remove_redundant_moves(instructions)
+        instructions = self.strength_reduction(instructions)
         instructions = self.remove_redundant_jumps(instructions)
-
-
 
         out = TACProgram()
         out.instructions = instructions
-        out.temp_counter = self.program.temp_counter
+        
+        # Contar temporales usados
+        max_temp = 0
+        for inst in instructions:
+            for op in [inst.result, inst.arg1, inst.arg2]:
+                if op and _is_temp_name(op):
+                    try:
+                        num = int(str(op).replace('t', ''))
+                        max_temp = max(max_temp, num)
+                    except:
+                        pass
+        
+        out.temp_counter = max_temp
         out.label_counter = self.program.label_counter
+        
+        print(f"✅ Optimización completa: {self.program.temp_counter} → {max_temp} temporales")
         return out
 
+    def _surgical_optimize(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """Aplica optimizaciones quirúrgicas específicas"""
+        liveness = self._compute_liveness(instructions)
+        
+        # Optimización 1: Eliminar temporales de uso único
+        instructions = self._opt_single_use(instructions, liveness)
+        liveness = self._compute_liveness(instructions)
+        
+        # Optimización 2: Load forwarding
+        instructions = self._opt_load_forwarding(instructions, liveness)
+        liveness = self._compute_liveness(instructions)
+        
+        # Optimización 3: Renumeración óptima
+        instructions = self._opt_temp_renaming(instructions, liveness)
+        
+        return instructions
     
-    # ---------------- passes ----------------
+    def _compute_liveness(self, instructions: List[TACInstruction]) -> Dict[str, LivenessInfo]:
+        """Calcula información de vida de temporales"""
+        info = {}
+        
+        for i, inst in enumerate(instructions):
+            # Definiciones
+            if inst.result and _is_temp_name(inst.result):
+                name = str(inst.result)
+                if name not in info:
+                    info[name] = LivenessInfo(i, i, set(), set())
+                info[name].defs.add(i)
+                info[name].first_def = min(info[name].first_def, i)
+            
+            # Usos
+            for arg in [inst.arg1, inst.arg2]:
+                if arg and _is_temp_name(arg):
+                    name = str(arg)
+                    if name not in info:
+                        info[name] = LivenessInfo(0, i, set(), set())
+                    info[name].uses.add(i)
+                    info[name].last_use = max(info[name].last_use, i)
+        
+        return info
+    
+    def _opt_single_use(self, instructions: List[TACInstruction], 
+                        liveness: Dict[str, LivenessInfo]) -> List[TACInstruction]:
+        """Elimina temporales de uso único"""
+        result = []
+        single_use = {}
+        
+        # Identificar candidatos
+        for name, info in liveness.items():
+            if len(info.uses) == 1 and len(info.defs) == 1:
+                def_idx = list(info.defs)[0]
+                use_idx = list(info.uses)[0]
+                
+                # Solo si están cerca y no cruzan boundaries
+                if 0 < use_idx - def_idx <= 5:
+                    # Verificar que no hay labels/calls entre medio
+                    safe = True
+                    for j in range(def_idx + 1, use_idx):
+                        if instructions[j].op in [TACOp.LABEL, TACOp.CALL, 
+                                                   TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE]:
+                            safe = False
+                            break
+                    
+                    if safe:
+                        single_use[name] = def_idx
+        
+        skip_indices = set()
+        replacements = {}
+        
+        for i, inst in enumerate(instructions):
+            if (inst.result and str(inst.result) in single_use and
+                single_use[str(inst.result)] == i):
+                
+                # Solo optimizar casos seguros
+                if inst.op == TACOp.DEREF:
+                    replacements[str(inst.result)] = inst.arg1
+                    skip_indices.add(i)
+                    continue
+                elif inst.op == TACOp.ASSIGN and inst.arg1:
+                    # Solo si arg1 no es un temporal que va a morir
+                    if not _is_temp_name(inst.arg1) or str(inst.arg1) not in single_use:
+                        replacements[str(inst.result)] = inst.arg1
+                        skip_indices.add(i)
+                        continue
+        
+        # Aplicar reemplazos
+        for i, inst in enumerate(instructions):
+            if i in skip_indices:
+                continue
+            
+            a1 = inst.arg1
+            a2 = inst.arg2
+            
+            if a1 and str(a1) in replacements:
+                a1 = replacements[str(a1)]
+            if a2 and str(a2) in replacements:
+                a2 = replacements[str(a2)]
+            
+            result.append(TACInstruction(inst.op, inst.result, a1, a2))
+        
+        return result
+    
+    def _opt_load_forwarding(self, instructions: List[TACInstruction],
+                            liveness: Dict[str, LivenessInfo]) -> List[TACInstruction]:
+        """Forward de cargas desde memoria - versión mejorada"""
+        result = []
+        memory_map = {}  # addr -> (temp, idx)
+        
+        for i, inst in enumerate(instructions):
+            # Invalidar en operaciones peligrosas
+            if inst.op in [TACOp.CALL, TACOp.FIELD_ASSIGN, TACOp.ARRAY_ASSIGN,
+                          TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE]:
+                memory_map.clear()
+                result.append(inst)
+                continue
+            
+            # Store: addr = temp
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and str(inst.result).startswith("0x") and
+                inst.arg1 and _is_temp_name(inst.arg1)):
+                
+                memory_map[str(inst.result)] = (str(inst.arg1), i)
+                result.append(inst)
+                continue
+            
+            # Load: temp = @addr
+            if (inst.op == TACOp.DEREF and
+                inst.arg1 and str(inst.arg1).startswith("0x")):
+                
+                addr = str(inst.arg1)
+                
+                if addr in memory_map:
+                    prev_temp, write_idx = memory_map[addr]
+                    
+                    # Verificar que el temporal siga vivo
+                    if prev_temp in liveness:
+                        info = liveness[prev_temp]
+                        
+                        # Forwarding si el temporal está vivo Y no fue modificado
+                        if info.last_use >= i and write_idx < i:
+                            # Caso especial: si es el mismo temporal, eliminar la carga
+                            if str(inst.result) == prev_temp:
+                                continue
+                            else:
+                                # Forwarding: usar el temporal directamente
+                                result.append(TACInstruction(
+                                    TACOp.ASSIGN,
+                                    inst.result,
+                                    TACOperand(prev_temp)
+                                ))
+                                continue
+                
+                result.append(inst)
+                continue
+            
+            result.append(inst)
+        
+        return result
+
+    # =================== NUEVOS PASES FINALES ===================
+    def constant_cleanup(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Limpia asignaciones de constantes no usadas, fortaleciendo el uso directo
+        de constantes en vez de temporales intermedios que se pierden.
+        """
+        result: List[TACInstruction] = []
+        const_temps: Dict[str, TACOperand] = {}
+        
+        for inst in instructions:
+            # Resetear en boundaries
+            if inst.op in [TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
+                           TACOp.CALL, TACOp.FUNC_START, TACOp.FUNC_END]:
+                const_temps.clear()
+                result.append(inst)
+                continue
+            
+            # Registrar: temp = constante
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and _is_temp_name(inst.result) and
+                inst.arg1 and _is_const(inst.arg1)):
+                const_temps[str(inst.result)] = inst.arg1
+                result.append(inst)
+                continue
+            
+            # Sustituir uso de temp por constante
+            a1 = inst.arg1
+            a2 = inst.arg2
+            if a1 and str(a1) in const_temps:
+                a1 = const_temps[str(a1)]
+            if a2 and str(a2) in const_temps:
+                a2 = const_temps[str(a2)]
+            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            
+            # Si redefinimos el temp, removerlo del mapa
+            if new_inst.result and str(new_inst.result) in const_temps:
+                del const_temps[str(new_inst.result)]
+            
+            result.append(new_inst)
+        
+        return result
+
+    def remove_unused_constant_loads(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Elimina cargas de constantes que nunca se usan si son redefinidas antes de cualquier uso.
+        """
+        defs: Dict[str, List[int]] = {}
+        uses: Dict[str, Set[int]] = {}
+        
+        for i, inst in enumerate(instructions):
+            # Registrar definiciones
+            if inst.result and _is_temp_name(inst.result):
+                temp = str(inst.result)
+                defs.setdefault(temp, []).append(i)
+            # Registrar usos
+            for arg in [inst.arg1, inst.arg2]:
+                if arg and _is_temp_name(arg):
+                    temp = str(arg)
+                    uses.setdefault(temp, set()).add(i)
+        
+        # Identificar definiciones muertas
+        dead_indices: Set[int] = set()
+        for temp, def_indices in defs.items():
+            if len(def_indices) > 1:
+                for i, def_idx in enumerate(def_indices[:-1]):
+                    inst = instructions[def_idx]
+                    if inst.op == TACOp.ASSIGN and _is_const(inst.arg1):
+                        next_def = def_indices[i + 1]
+                        used_between = any(def_idx < use_idx < next_def for use_idx in uses.get(temp, set()))
+                        if not used_between:
+                            dead_indices.add(def_idx)
+        
+        # Filtrar
+        result: List[TACInstruction] = []
+        for i, inst in enumerate(instructions):
+            if i not in dead_indices:
+                result.append(inst)
+        return result
+
+    def optimize_memory_loads(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Optimiza cargas consecutivas de la misma dirección mientras la memoria no cambie.
+        """
+        result: List[TACInstruction] = []
+        last_load: Dict[str, tuple] = {}
+        
+        for i, inst in enumerate(instructions):
+            # Invalidar en escrituras o calls
+            if inst.op in [TACOp.CALL, TACOp.ASSIGN]:
+                if inst.result and (str(inst.result).startswith("0x") or str(inst.result).startswith("FP[")):
+                    addr = str(inst.result)
+                    if addr in last_load:
+                        del last_load[addr]
+            
+            # Invalidar todo en boundaries peligrosos
+            if inst.op in [TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
+                           TACOp.FUNC_START, TACOp.FUNC_END]:
+                last_load.clear()
+            
+            # Detectar load: temp = @addr
+            if inst.op == TACOp.DEREF and inst.arg1 is not None:
+                addr = str(inst.arg1)
+                if addr in last_load:
+                    prev_temp, prev_idx = last_load[addr]
+                    result.append(TACInstruction(
+                        TACOp.ASSIGN,
+                        inst.result,
+                        TACOperand(prev_temp)
+                    ))
+                    last_load[addr] = (str(inst.result), i)
+                    continue
+                last_load[addr] = (str(inst.result), i)
+            
+            result.append(inst)
+        
+        return result
+
+    def strength_reduction(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Reducción de fuerza: reemplaza operaciones costosas por baratas cuando es seguro.
+        """
+        result: List[TACInstruction] = []
+        for inst in instructions:
+            if inst.op == TACOp.MUL:
+                # x * 2 → x + x
+                if _is_const(inst.arg2) and _const_val(inst.arg2) == 2:
+                    result.append(TACInstruction(TACOp.ADD, inst.result, inst.arg1, inst.arg1))
+                    continue
+                # 2 * x → x + x
+                if _is_const(inst.arg1) and _const_val(inst.arg1) == 2:
+                    result.append(TACInstruction(TACOp.ADD, inst.result, inst.arg2, inst.arg2))
+                    continue
+            result.append(inst)
+        return result
+
+    def eliminate_copy_chains(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Elimina cadenas de copias transitivas dentro de regiones lineales.
+        """
+        result: List[TACInstruction] = []
+        copy_map: Dict[str, str] = {}
+        
+        for inst in instructions:
+            # Resetear en boundaries
+            if inst.op in [TACOp.LABEL, TACOp.CALL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE]:
+                copy_map.clear()
+                result.append(inst)
+                continue
+            
+            # Detectar copia simple t_dst = t_src
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and _is_temp_name(inst.result) and
+                inst.arg1 and _is_temp_name(inst.arg1)):
+                src = str(inst.arg1)
+                dst = str(inst.result)
+                while src in copy_map:
+                    src = copy_map[src]
+                copy_map[dst] = src
+                result.append(inst)
+                continue
+            
+            # Sustituir usos
+            a1 = inst.arg1
+            a2 = inst.arg2
+            if a1 and str(a1) in copy_map:
+                a1 = TACOperand(copy_map[str(a1)])
+            if a2 and str(a2) in copy_map:
+                a2 = TACOperand(copy_map[str(a2)])
+            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            
+            # Si redefinimos el destino, invalidar
+            if new_inst.result and str(new_inst.result) in copy_map:
+                del copy_map[str(new_inst.result)]
+            
+            result.append(new_inst)
+        
+        return result
+
+    def _count_temps(self, instructions: List[TACInstruction]) -> int:
+        """Cuenta el número máximo de temporales usados"""
+        max_temp = 0
+        for inst in instructions:
+            for op in [inst.result, inst.arg1, inst.arg2]:
+                if op and _is_temp_name(op):
+                    try:
+                        num = int(str(op).replace('t', ''))
+                        max_temp = max(max_temp, num)
+                    except:
+                        pass
+        return max_temp
+    def enhanced_constant_folding(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Constant folding mejorado que detecta patrones adicionales:
+        - t1 = 2; t2 = 1; t3 = t1 + t2 → t3 = 3
+        - t1 = const; uso inmediato de t1 → reemplazar
+        """
+        result = []
+        const_map: Dict[str, int] = {}
+        
+        for inst in instructions:
+            # Resetear en boundaries
+            if inst.op in [TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE, 
+                           TACOp.CALL, TACOp.FUNC_START, TACOp.FUNC_END]:
+                const_map.clear()
+                result.append(inst)
+                continue
+            
+            # Si es asignación de constante a temporal, registrar
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and _is_temp_name(inst.result) and
+                inst.arg1 and _is_const(inst.arg1)):
+                
+                const_map[str(inst.result)] = _const_val(inst.arg1)
+                result.append(inst)
+                continue
+            
+            # Sustituir argumentos por constantes conocidas
+            a1 = inst.arg1
+            a2 = inst.arg2
+            
+            if a1 and _is_temp_name(a1) and str(a1) in const_map:
+                a1 = TACOperand(const_map[str(a1)], is_constant=True)
+            
+            if a2 and _is_temp_name(a2) and str(a2) in const_map:
+                a2 = TACOperand(const_map[str(a2)], is_constant=True)
+            
+            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            
+            # Si ahora ambos operandos son constantes, plegar (ej: ADD)
+            if new_inst.op == TACOp.ADD and _is_const(a1) and _is_const(a2):
+                v1 = _const_val(a1)
+                v2 = _const_val(a2)
+                if isinstance(v1, int) and isinstance(v2, int):
+                    new_inst = TACInstruction(
+                        TACOp.ASSIGN, 
+                        new_inst.result, 
+                        TACOperand(v1 + v2, is_constant=True)
+                    )
+            
+            # Invalidar si el temporal se redefine
+            if new_inst.result and str(new_inst.result) in const_map:
+                del const_map[str(new_inst.result)]
+            
+            result.append(new_inst)
+        
+        return result
+
+    def remove_redundant_stores(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """
+        Elimina stores redundantes:
+        - 0x1000 = t1; t2 = @0x1000; 0x1000 = t2 → Eliminar último store
+        """
+        result: List[TACInstruction] = []
+        last_store: Dict[str, tuple] = {}
+        
+        for inst in instructions:
+            # Invalidar en boundaries
+            if inst.op in [TACOp.CALL, TACOp.LABEL, TACOp.GOTO, 
+                           TACOp.IF_TRUE, TACOp.IF_FALSE]:
+                last_store.clear()
+            
+            # Store: addr = temp
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and str(inst.result).startswith("0x")):
+                
+                addr = str(inst.result)
+                temp = str(inst.arg1) if inst.arg1 else None
+                
+                # Si ya hay un store previo al mismo addr con el mismo valor
+                if addr in last_store:
+                    prev_temp, prev_idx = last_store[addr]
+                    
+                    if prev_temp == temp:
+                        # Redundante: no añadir
+                        continue
+                    else:
+                        # Diferente valor: reemplazar el anterior
+                        last_store[addr] = (temp, len(result))
+                else:
+                    last_store[addr] = (temp, len(result))
+            
+            result.append(inst)
+        
+        return result
+
+    def validate_tac(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """Valida y corrige TAC malformado"""
+        result: List[TACInstruction] = []
+        
+        for inst in instructions:
+            # Corregir: t1 = @t2 (DEREF de temporal) → t1 = t2
+            if inst.op == TACOp.DEREF and inst.arg1 and _is_temp_name(inst.arg1):
+                result.append(TACInstruction(
+                    TACOp.ASSIGN,
+                    inst.result,
+                    inst.arg1
+                ))
+                continue
+            
+            # Corregir: FP[x] = @tn → eliminar DEREF innecesario
+            if (inst.op == TACOp.ASSIGN and 
+                inst.result and "FP[" in str(inst.result) and
+                inst.arg1 and str(inst.arg1).startswith("@") and 
+                _is_temp_name(str(inst.arg1)[1:])):
+                
+                temp = str(inst.arg1)[1:]
+                result.append(TACInstruction(
+                    TACOp.ASSIGN,
+                    inst.result,
+                    TACOperand(temp)
+                ))
+                continue
+            
+            result.append(inst)
+        
+        return result
+    
+    def _opt_temp_renaming(self, instructions: List[TACInstruction],
+                          liveness: Dict[str, LivenessInfo]) -> List[TACInstruction]:
+        """Renumeración óptima usando graph coloring"""
+        if not liveness:
+            return instructions
+        
+        # Construir grafo de interferencia
+        interference = {name: set() for name in liveness.keys()}
+        
+        temps = list(liveness.keys())
+        for i in range(len(temps)):
+            for j in range(i + 1, len(temps)):
+                t1, t2 = temps[i], temps[j]
+                info1, info2 = liveness[t1], liveness[t2]
+                
+                # Interferencia si rangos se solapan
+                if not (info1.last_use < info2.first_def or 
+                        info2.last_use < info1.first_def):
+                    interference[t1].add(t2)
+                    interference[t2].add(t1)
+        
+        # Greedy coloring
+        coloring = {}
+        sorted_temps = sorted(temps, 
+                             key=lambda t: (len(interference[t]), liveness[t].first_def),
+                             reverse=True)
+        
+        for temp in sorted_temps:
+            used_colors = {coloring[n] for n in interference[temp] if n in coloring}
+            
+            color = 1
+            while color in used_colors:
+                color += 1
+            
+            coloring[temp] = color
+        
+        # Aplicar renombramiento
+        result = []
+        for inst in instructions:
+            def rename(op):
+                if op and _is_temp_name(op):
+                    name = str(op)
+                    if name in coloring:
+                        return TACOperand(f"t{coloring[name]}")
+                return op
+            
+            result.append(TACInstruction(
+                inst.op,
+                rename(inst.result),
+                rename(inst.arg1),
+                rename(inst.arg2)
+            ))
+        
+        return result
+    
+    # ============================================================
+    # OPTIMIZACIONES CLÁSICAS (mantener código original)
+    # ============================================================
+    
     def constant_folding(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """Evalúa expresiones con operandos constantes en tiempo de compilación"""
         result: List[TACInstruction] = []
@@ -93,10 +665,8 @@ class TACOptimizer:
             if inst.op in (TACOp.IF_TRUE, TACOp.IF_FALSE) and _is_const(inst.arg1):
                 cond = bool(_const_val(inst.arg1))
                 if (inst.op == TACOp.IF_TRUE and cond) or (inst.op == TACOp.IF_FALSE and not cond):
-                    # toma siempre la rama: reemplazar por GOTO
                     result.append(TACInstruction(TACOp.GOTO, arg1=inst.arg2))
                 else:
-                    # nunca toma la rama: eliminar instrucción
                     pass
                 continue
 
@@ -115,8 +685,6 @@ class TACOptimizer:
                         result.append(TACInstruction(TACOp.ASSIGN, inst.result, TACOperand(v, is_constant=True)))
                         continue
                 result.append(inst); continue
-            
-
 
             # Unarios
             if inst.op == TACOp.NEG:
@@ -139,26 +707,9 @@ class TACOptimizer:
             result.append(inst)
         
         return result
-    def remove_redundant_moves(self, instructions):
-        out = []
-        for inst in instructions:
-            if inst.op == TACOp.ASSIGN and inst.result is not None and inst.arg1 is not None:
-                if str(inst.result) == str(inst.arg1):
-                    # x = x  --> eliminar
-                    continue
-            out.append(inst)
-        return out
-
     
     def constant_propagation(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
-        """
-        Propagación de constantes *local a bloque lineal*:
-        - Resetea el mapa de constantes al cruzar límites de control:
-        LABEL, GOTO, IF_TRUE/FALSE, RETURN, CALL, PARAM, FUNC_START/END,
-        además de ARRAY_ASSIGN / FIELD_ASSIGN (efectos a memoria).
-        - Sustituye operands por constantes conocidas.
-        - Pliega IF_TRUE / IF_FALSE con condición constante.
-        """
+        """Propagación de constantes local a bloque lineal"""
         boundaries = {
             TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
             TACOp.RETURN, TACOp.CALL, TACOp.PARAM,
@@ -179,30 +730,22 @@ class TACOptimizer:
             return consts.get(key, opnd)
 
         for inst in instructions:
-            # Si estamos en un límite de bloque, reseteamos antes de procesar
             if inst.op in boundaries:
-                # Plegar IF_* si la condición ya era constante ANTES de resetear
                 if inst.op in (TACOp.IF_TRUE, TACOp.IF_FALSE) and _is_const(inst.arg1):
                     cond = bool(_const_val(inst.arg1))
                     if (inst.op == TACOp.IF_TRUE and cond) or (inst.op == TACOp.IF_FALSE and not cond):
-                        # IF siempre toma la rama -> convertir a GOTO
                         out.append(TACInstruction(TACOp.GOTO, arg1=inst.arg2))
                     else:
-                        # IF nunca toma la rama -> eliminar la instrucción
                         pass
                 else:
                     out.append(inst)
                 reset()
-                # Si es RETURN, también resetea (ya hecho) y sigue
                 continue
 
-            # Sustituir operandos
             a1 = subst(inst.arg1)
             a2 = subst(inst.arg2)
-
             new_inst = TACInstruction(inst.op, inst.result, a1, a2)
 
-            #  mapear también temporales (intra-bloque es seguro)
             if new_inst.op == TACOp.ASSIGN and _is_const(new_inst.arg1):
                 if new_inst.result is not None:
                     consts[str(new_inst.result)] = new_inst.arg1
@@ -210,61 +753,9 @@ class TACOptimizer:
                 if new_inst.result is not None and str(new_inst.result) in consts:
                     del consts[str(new_inst.result)]
 
-
             out.append(new_inst)
 
         return out
-
-    
-    def dead_code_elimination(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
-        """Elimina código muerto (conservador, intra-bloque)."""
-        used_vars: Set[str] = set()
-
-        # 1) Marcar usos directos (incluye casos donde el 'operando' va en result)
-        for inst in instructions:
-            op = inst.op
-            # Operaciones con efecto/flujo: marcan su operando
-            if op in (TACOp.PRINT, TACOp.RETURN, TACOp.IF_TRUE, TACOp.IF_FALSE, TACOp.PARAM):
-                if inst.arg1 is not None:
-                    used_vars.add(str(inst.arg1))
-            # Llamadas: conservamos la CALL siempre; los args ya se marcan por PARAM
-            # Aritm/relacionales usan arg1/arg2
-            if inst.arg1 is not None and op != TACOp.ASSIGN:
-                used_vars.add(str(inst.arg1))
-            if inst.arg2 is not None:
-                used_vars.add(str(inst.arg2))
-            # MUY IMPORTANTE: en ARRAY_ASSIGN / FIELD_ASSIGN el receptor está en 'result'
-            if op in (TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN):
-                if inst.result is not None:
-                    used_vars.add(str(inst.result))
-
-        # 2) Propagar hacia atrás (muy simplificado)
-        changed = True
-        while changed:
-            changed = False
-            for inst in reversed(instructions):
-                if inst.result is not None and str(inst.result) in used_vars:
-                    if inst.arg1 is not None and str(inst.arg1) not in used_vars:
-                        used_vars.add(str(inst.arg1)); changed = True
-                    if inst.arg2 is not None and str(inst.arg2) not in used_vars:
-                        used_vars.add(str(inst.arg2)); changed = True
-
-        # 3) Conservar side-effects/flujo siempre
-        keep_ops = {
-            TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
-            TACOp.PRINT, TACOp.RETURN, TACOp.PARAM, TACOp.CALL,
-            TACOp.FUNC_START, TACOp.FUNC_END, TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN
-        }
-
-        result: List[TACInstruction] = []
-        for inst in instructions:
-            if inst.op in keep_ops:
-                result.append(inst)
-            elif inst.result is not None and str(inst.result) in used_vars:
-                result.append(inst)
-            # else: muerto → se elimina
-        return result
-
     
     def algebraic_simplification(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """Simplificaciones algebraicas básicas"""
@@ -318,54 +809,19 @@ class TACOptimizer:
                     result.append(inst)
                 continue
             
-            # por defecto
-            result.append(inst)
-        
-        return result
-    
-    def remove_redundant_jumps(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
-        """Elimina saltos redundantes"""
-        result: List[TACInstruction] = []
-        
-        for i, inst in enumerate(instructions):
-            # Eliminar GOTO a la etiqueta inmediata siguiente
-            if inst.op == TACOp.GOTO:
-                if i + 1 < len(instructions) and instructions[i + 1].op == TACOp.LABEL:
-                    if str(inst.arg1) == str(instructions[i + 1].arg1):
-                        continue  # quitar el GOTO redundante
-            
-            # Eliminar etiquetas no referenciadas
-            if inst.op == TACOp.LABEL:
-                label_name = str(inst.arg1)
-                referenced = False
-                for other in instructions:
-                    if other is inst: 
-                        continue
-                    if other.arg1 is not None and str(other.arg1) == label_name:
-                        referenced = True; break
-                    if other.arg2 is not None and str(other.arg2) == label_name:
-                        referenced = True; break
-                if not referenced:
-                    continue  # quitar etiqueta huérfana
-            
             result.append(inst)
         
         return result
     
     def copy_propagation(self, instructions):
-        """
-        Propagación de copias local a bloque lineal.
-        Regla: result = x  ==> sustituye usos posteriores de 'result' por 'x'
-        Reinicia en boundaries (LABEL, GOTO, IF_*, RETURN, CALL, PARAM, FUNC_*, ARRAY_ASSIGN, FIELD_ASSIGN).
-        """
+        """Propagación de copias local a bloque lineal"""
         boundaries = {
             TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
             TACOp.RETURN, TACOp.CALL, TACOp.PARAM,
             TACOp.FUNC_START, TACOp.FUNC_END,
             TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN
         }
-        alias = {}  # nombre -> nombre origen
-
+        alias = {}
 
         def reset():
             alias.clear()
@@ -386,32 +842,108 @@ class TACOptimizer:
             if inst.op in boundaries:
                 out.append(inst); reset(); continue
 
-            # Sustituir args por su raíz
             a1, a2 = inst.arg1, inst.arg2
             if a1 is not None and not _is_const(a1): a1 = TACOperand(root(str(a1)))
             if a2 is not None and not _is_const(a2): a2 = TACOperand(root(str(a2)))
             new_inst = TACInstruction(inst.op, inst.result, a1, a2)
 
-            # Si esta instrucción **reescribe** un nombre, rompe alias que apunten a él
             if new_inst.result is not None:
                 break_aliases_pointing_to(str(new_inst.result))
 
-            # Registrar alias sólo para ASSIGN con fuente no-const
             if new_inst.op == TACOp.ASSIGN and new_inst.arg1 is not None and not _is_const(new_inst.arg1):
                 alias[str(new_inst.result)] = root(str(new_inst.arg1))
             out.append(new_inst)
         return out
+    
+    def dead_code_elimination(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """Elimina código muerto (conservador, intra-bloque)"""
+        used_vars: Set[str] = set()
 
+        # 1) Marcar usos directos
+        for inst in instructions:
+            op = inst.op
+            if op in (TACOp.PRINT, TACOp.RETURN, TACOp.IF_TRUE, TACOp.IF_FALSE, TACOp.PARAM):
+                if inst.arg1 is not None:
+                    used_vars.add(str(inst.arg1))
+            if inst.arg1 is not None and op != TACOp.ASSIGN:
+                used_vars.add(str(inst.arg1))
+            if inst.arg2 is not None:
+                used_vars.add(str(inst.arg2))
+            if op in (TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN):
+                if inst.result is not None:
+                    used_vars.add(str(inst.result))
+
+        # 2) Propagar hacia atrás
+        changed = True
+        while changed:
+            changed = False
+            for inst in reversed(instructions):
+                if inst.result is not None and str(inst.result) in used_vars:
+                    if inst.arg1 is not None and str(inst.arg1) not in used_vars:
+                        used_vars.add(str(inst.arg1)); changed = True
+                    if inst.arg2 is not None and str(inst.arg2) not in used_vars:
+                        used_vars.add(str(inst.arg2)); changed = True
+
+        # 3) Conservar side-effects/flujo siempre
+        keep_ops = {
+            TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE,
+            TACOp.PRINT, TACOp.RETURN, TACOp.PARAM, TACOp.CALL,
+            TACOp.FUNC_START, TACOp.FUNC_END, TACOp.ARRAY_ASSIGN, TACOp.FIELD_ASSIGN,
+            TACOp.PUSH, TACOp.POP, TACOp.ENTER, TACOp.LEAVE, TACOp.ADD_SP
+        }
+
+        result: List[TACInstruction] = []
+        for inst in instructions:
+            if inst.op in keep_ops:
+                result.append(inst)
+            elif inst.result is not None and str(inst.result) in used_vars:
+                result.append(inst)
+        return result
+    
+    def remove_redundant_moves(self, instructions):
+        out = []
+        for inst in instructions:
+            if inst.op == TACOp.ASSIGN and inst.result is not None and inst.arg1 is not None:
+                if str(inst.result) == str(inst.arg1):
+                    continue
+            out.append(inst)
+        return out
+    
+    def remove_redundant_jumps(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
+        """Elimina saltos redundantes"""
+        result: List[TACInstruction] = []
+        
+        for i, inst in enumerate(instructions):
+            # Eliminar GOTO a la etiqueta inmediata siguiente
+            if inst.op == TACOp.GOTO:
+                if i + 1 < len(instructions) and instructions[i + 1].op == TACOp.LABEL:
+                    if str(inst.arg1) == str(instructions[i + 1].arg1):
+                        continue
+            
+            # Eliminar etiquetas no referenciadas
+            if inst.op == TACOp.LABEL:
+                label_name = str(inst.arg1)
+                referenced = False
+                for other in instructions:
+                    if other is inst: 
+                        continue
+                    if other.arg1 is not None and str(other.arg1) == label_name:
+                        referenced = True; break
+                    if other.arg2 is not None and str(other.arg2) == label_name:
+                        referenced = True; break
+                if not referenced:
+                    continue
+            
+            result.append(inst)
+        
+        return result
     
     # -------- helpers de valor ----------
     def _is_constant(self, operand: Optional[TACOperand]) -> bool:
-        """Conserva compatibilidad con código existente (usa wrapper)"""
         return _is_const(operand)
     
     def _is_zero(self, operand: Optional[TACOperand]) -> bool:
-        """Verifica si un operando es cero"""
         return _is_const(operand) and _const_val(operand) == 0
     
     def _is_one(self, operand: Optional[TACOperand]) -> bool:
-        """Verifica si un operando es uno"""
         return _is_const(operand) and _const_val(operand) == 1
