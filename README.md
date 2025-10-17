@@ -1,244 +1,333 @@
-# Compiscript – M1: Análisis Semántico (Python + ANTLR4)
+# Generación de Código Intermedio TAC
 
-Front-end parcial para **Compiscript** (subset de TypeScript).
-Incluye **lexer/parser** generados con ANTLR4, **análisis semántico** en Python (dos pases) y un **IDE web** minimal (FastAPI + Monaco) que muestra errores en el editor.
+Este compilador genera código intermedio en formato TAC (Three-Address Code) optimizado para Compiscript.
 
-**Comportamiento esperado del analizador**
+## Ejemplo Completo
 
-* Si el `.cps` está correcto → **no imprime nada** (exit code `0`).
-* Si hay errores → imprime líneas tipo:
+### Código Fuente Compiscript
 
-  ```
-  [E004] (12:3) No se puede asignar 'string' a 'integer'.
-  ```
+```javascript
+// --- Utilidad global ---
+function toString(x: integer): string {
+  return "";
+}
 
-  y retorna `exit code != 0`.
+// --- Clase base ---
+class Persona {
+  var nombre: string;
+  var edad: integer;
+  var color: string;
 
----
+  function constructor(nombre: string, edad: integer) {
+    this.nombre = nombre;
+    this.edad = edad;
+    this.color = "rojo";
+  }
 
-## Requisitos
+  function saludar(): string {
+    return "Hola, mi nombre es " + this.nombre;
+  }
 
-* Python 3.10+ (recomendado 3.11).
-* Java 8+ (para ejecutar el JAR de ANTLR).
-* Paquetes Python:
+  function incrementarEdad(anos: integer): string {
+    this.edad = this.edad + anos;
+    return "Ahora tengo " + toString(this.edad) + " años.";
+  }
+}
 
-  ```
-  pip install -r requirements.txt
-  ```
+// --- Clase derivada ---
+class Estudiante : Persona {
+  var grado: integer;
 
-  (incluye `antlr4-python3-runtime`, `fastapi`, `uvicorn`, `pytest` si lo agregas).
+  function constructor(nombre: string, edad: integer, grado: integer) {
+    // No hay 'super': inicializamos campos heredados directamente
+    this.nombre = nombre;
+    this.edad = edad;
+    this.color = "rojo";
+    this.grado = grado;
+  }
 
----
+  function estudiar(): string {
+    return this.nombre + " está estudiando en " + toString(this.grado) + " grado.";
+  }
 
-## 1) Generar lexer/parser con ANTLR
+  function promedioNotas(nota1: integer, nota2: integer, nota3: integer): integer {
+    let promedio: integer = (nota1 + nota2 + nota3) / 3; // división entera
+    return promedio;
+  }
+}
 
-La gramática está en `program/Compiscript.g4`. Desde la **raíz** del repo:
+// --- Programa principal ---
+let log: string = "";
 
-```bash
-java -jar antlr-4.13.1-complete.jar -Dlanguage=Python3 -visitor \
-  -o program/gen -Xexact-output-dir program/Compiscript.g4
+let nombre: string = "Erick";
+let juan: Estudiante = new Estudiante(nombre, 20, 3);
+
+// "Imprimir" = concatenar al log con saltos de línea
+log = log + juan.saludar() + "\n";
+log = log + juan.estudiar() + "\n";
+log = log + juan.incrementarEdad(5) + "\n";
+
+// Bucle (uso de while por compatibilidad)
+let i: integer = 1;
+while (i <= 5) {
+  if ((i % 2) == 0) {
+    log = log + toString(i) + " es par\n";
+  } else {
+    log = log + toString(i) + " es impar\n";
+  }
+  i = i + 1;
+}
+
+// Expresión aritmética (entera)
+let resultado: integer = (juan.edad * 2) + ((5 - 3) / 2);
+log = log + "Resultado de la expresión: " + toString(resultado) + "\n";
+
+// Ejemplo de promedio (entero)
+let prom: integer = 0;
+prom = juan.promedioNotas(90, 85, 95);
+log = log + "Promedio (entero): " + toString(prom) + "\n";
+
+// Nota: 'log' contiene todas las salidas.
 ```
 
-Esto crea en `program/gen/`:
+### Código TAC Generado (Optimizado)
+
+```assembly
+function toString:
+enter 16
+return ""
+leave
+end_function toString
+
+function constructor:
+enter 24
+t1 = @FP[-4]
+this."nombre" = t1
+t1 = @FP[-12]
+this."edad" = t1
+this."color" = "rojo"
+leave
+end_function constructor
+
+function saludar:
+enter 12
+t1 = this."nombre"
+t3 = "Hola, mi nombre es " add t1
+return t3
+leave
+end_function saludar
+
+function incrementarEdad:
+enter 16
+t3 = this."edad"
+t1 = @FP[-4]
+t2 = t3 add t1
+this."edad" = t2
+t2 = this."edad"
+push t2
+call toString, 1
+SP = SP + 4
+pop t1
+t2 = "Ahora tengo " add t1
+t1 = t2 add " años."
+return t1
+leave
+end_function incrementarEdad
+
+function constructor:
+enter 28
+t1 = @FP[-4]
+this."nombre" = t1
+t1 = @FP[-12]
+this."edad" = t1
+this."color" = "rojo"
+t1 = @FP[-16]
+this."grado" = t1
+leave
+end_function constructor
+
+function estudiar:
+enter 12
+t1 = this."nombre"
+t2 = t1 add " está estudiando en "
+t1 = this."grado"
+push t1
+call toString, 1
+SP = SP + 4
+pop t3
+t1 = t2 add t3
+t3 = t1 add " grado."
+return t3
+leave
+end_function estudiar
+
+function promedioNotas:
+enter 28
+t3 = @FP[-4]
+t1 = @FP[-8]
+t2 = t3 add t1
+t1 = @FP[-12]
+t3 = t2 add t1
+t1 = t3 div 3
+FP[0] = t1
+return FP[0]
+leave
+end_function promedioNotas
+
+; === Código principal ===
+0x1000 = ""
+t1 = new Estudiante
+t3 = @"Erick"
+push t3
+push 20
+push 3
+call Estudiante.constructor, 3
+0x1008 = t1
+
+t1 = @0x1000
+t3 = t1
+t2 = t1."saludar"
+call t2, 0
+pop t2
+t3 = t1 add t2
+t2 = t3 add "\n"
+0x1000 = t2
+
+t3 = @0x1008
+t1 = t3."estudiar"
+call t1, 0
+pop t1
+t3 = t2 add t1
+t1 = t3 add "\n"
+0x1000 = t1
+
+t2 = t3."incrementarEdad"
+push 5
+call t2, 1
+SP = SP + 4
+pop t2
+t3 = t1 add t2
+t2 = t3 add "\n"
+0x1000 = t2
+
+0x100c = 1
+L0:
+t2 = @0x100c
+t3 = t2 <= 5
+ifFalse t3 goto L1
+t2 = @0x100c
+t1 = t2 mod 2
+t2 = t1 == 0
+ifFalse t2 goto L2
+
+t1 = @0x1000
+t4 = @0x100c
+push t4
+call toString, 1
+SP = SP + 4
+pop t2
+t4 = t1 add t2
+t2 = t4 add " es par\n"
+0x1000 = t2
+goto L3
+
+L2:
+t2 = @0x1000
+t4 = @0x100c
+push t4
+call toString, 1
+SP = SP + 4
+pop t1
+t4 = t2 add t1
+t1 = t4 add " es impar\n"
+0x1000 = t1
+
+L3:
+t1 = @0x100c
+t4 = t1 add 1
+0x100c = t4
+goto L0
+
+L1:
+t3 = @0x1008
+t4 = t3."edad"
+t1 = t4 add t4            ; Optimización: x*2 → x+x
+t4 = t1 add 1
+t4 = @0x1000
+t2 = t4 add "Resultado de la expresión: "
+push t4
+call toString, 1
+SP = SP + 4
+pop t1
+t4 = t2 add t1
+t1 = t4 add "\n"
+0x1000 = t1
+
+t1 = t3
+t4 = t3."promedioNotas"
+push 95
+push 85
+push 90
+call t4, 3
+SP = SP + 12
+pop t2
+
+t2 = @0x1000
+t3 = t2 add "Promedio (entero): "
+push t2
+call toString, 1
+SP = SP + 4
+pop t1
+t2 = t3 add t1
+t1 = t2 add "\n"
+0x1000 = t1
+```
+
+## Características del TAC Generado
+
+### ✅ Optimizaciones Aplicadas
+
+1. **Constant Folding**: Expresiones constantes evaluadas en tiempo de compilación
+   - `5 - 3` → `2`
+   - `2 / 2` → `1`
+
+2. **Strength Reduction**: Operaciones costosas reemplazadas por más eficientes
+   - `x * 2` → `x + x` (línea: `t1 = t4 add t4`)
+
+3. **Register Allocation**: Uso eficiente de temporales
+   - Solo 4 temporales (`t1-t4`) para todo el programa
+
+4. **Dead Code Elimination**: Código muerto eliminado
+
+5. **Copy Propagation**: Copias innecesarias eliminadas
+
+### 📊 Métricas
+
+- **Temporales utilizados**: 4 (t1, t2, t3, t4)
+- **Funciones generadas**: 7 (toString + 6 métodos de clases)
+- **Variables globales**: 3 (direcciones 0x1000, 0x1008, 0x100c)
+- **Etiquetas**: 4 (L0-L3)
+
+### 🏗️ Estructura del Frame de Activación
+
+Cada función utiliza la siguiente estructura:
 
 ```
-CompiscriptLexer.py  CompiscriptParser.py  CompiscriptVisitor.py  (y .interp/.tokens)
+[ Parámetros ]     ← FP[-n]  (offsets negativos)
+[ Return Address ]
+[ Old FP ]         ← FP
+[ Locals ]         ← FP[0+]  (offsets positivos)
 ```
 
-> No edites nada dentro de `program/gen/`. Si cambias la gramática, vuelve a ejecutar el comando.
+Ejemplo en `promedioNotas`:
+- `FP[-4]`: nota1
+- `FP[-8]`: nota2
+- `FP[-12]`: nota3
+- `FP[0]`: promedio (variable local)
 
----
+### 🎯 Convenciones de Llamadas
 
-## 2) Ejecutar el analizador sobre un archivo
-
-```bash
-python -m program.Driver program/program.cps
-```
-
-* Si no hay errores → no imprime nada.
-* Si hay errores → imprime `[EXXX] (línea:col) mensaje` y retorna `!= 0`.
-
-> Consejo: ejecuta siempre desde la **raíz** del repo para que los imports funcionen.
-
----
-
-## 3) IDE web (FastAPI + Monaco)
-
-Estructura:
-
-```
-ide/
-├── server.py          # endpoint /analyze + estáticos
-└── static/
-    ├── index.html     # UI del editor
-    └── main.js        # lógica del editor (análisis, markers)
-```
-
-Levantar el IDE:
-
-```bash
-uvicorn ide.server:app --reload --port 3000
-# abre http://localhost:3000
-```
-
-Cómo funciona:
-
-* El frontend envía el código a `POST /analyze`.
-* El backend corre parser + Pass1 + Pass2.
-* Devuelve `{"ok": true}` o `{"ok": false, "errors": [...]}`.
-* El editor marca los errores en la UI.
-
-> Si ves `405 Method Not Allowed` en `/analyze`, es que montaste estáticos en `/`.
-> En `server.py` dejamos `/static` para estáticos y un handler `GET /` que sirve `index.html`.
-
----
-
-## 4) Suite de tests
-
-Coloca tus casos en:
-
-```
-tests/
-├── valid/    # casos que deben compilar SIN errores
-└── invalid/  # casos que deben producir errores
-```
-
-Runner (ejemplo sugerido) en `scripts/run_tests.py`:
-
-```bash
-python scripts/run_tests.py                 # corre valid + invalid
-python scripts/run_tests.py --only valid
-python scripts/run_tests.py --only invalid --show-invalid
-```
-
-Criterio:
-
-* `valid/` → exit code `0` (OK).
-* `invalid/` → exit code `!= 0` (OK porque era esperado).
-  Con `--show-invalid` también muestra los mensajes de error.
-
----
-
-## 5) Estructura del proyecto
-
-```
-.
-├── antlr-4.13.1-complete.jar
-├── ide/
-│   ├── server.py
-│   └── static/ (index.html, main.js)
-├── program/
-│   ├── Compiscript.g4        # gramática ANTLR
-│   ├── program.cps           # ejemplo
-│   ├── Driver.py             # CLI del analizador
-│   └── gen/                  # (GENERADO) lexer/parser/visitor
-├── semantic/
-│   ├── errors.py             # ErrorCollector (report/pretty)
-│   ├── scope.py              # Scopes (árbol padre-hijo)
-│   ├── symbols.py            # VariableSymbol, FunctionSymbol, ClassSymbol
-│   ├── types.py              # INTEGER, STRING, BOOLEAN, NULL, ArrayType, ClassType, FunctionType...
-│   └── semantic_visitor.py   # Pass 1 (símbolos) + Pass 2 (tipado/reglas)
-├── scripts/
-│   └── run_tests.py          # runner de la suite
-├── tests/                    # casos valid/ e invalid/
-└── requirements.txt
-```
-
----
-
-## 6) ¿Qué valida el analizador?
-
-### Declaraciones & asignaciones
-
-* Redeclaración (E001), uso de no declarado (E002), `const` sin init (E003 si aplica).
-* Incompatibilidad de tipos (E004), reasignar `const` (E005), LHS inválido (E006).
-* **Inferencia** en `let/const` si no hay anotación (toma el tipo del initializer).
-
-### Expresiones
-
-* `!` y `-` unario; `&&`, `||`; relacionales; `+/-` (concat string si ambos string); `* / %` solo enteros.
-* Paréntesis tipan correctamente.
-
-### Arreglos
-
-* Literales homogéneos (E011 si mezclas).
-* Indexación `a[i]`: `i` entero (E030) y receptor arreglo (E031).
-
-### Funciones
-
-* `return`: tipo correcto (E012) y “todas las rutas retornan” si la función declara retorno (E015).
-* Llamadas: aridad (E021), tipos por argumento (E022), llamada a no-función (E020).
-
-### Control de flujo
-
-* Condiciones booleanas en `if/while/do/for` (E040).
-* `break/continue` solo dentro de loops (E041/E042).
-* `return` fuera de función (E014).
-
-### Clases, `this`, `new`
-
-* Propiedades/métodos: no-objeto (E033), miembro inexistente (E034), asignación a propiedad verifica tipos (E004).
-* `this` fuera de método de clase (E043).
-* `new C(...)`: clase no declarada (E037), aridad/tipos del constructor (E021/E022).
-
-### Herencia
-
-* `class A : B` base no encontrada (E051), ciclo (E052).
-* Overrides incompatibles (E053), conflictos de campos heredados (E054).
-* El constructor **no** se hereda.
-
-### `switch / case`
-
-* Tipo del `switch(expr)` compatible con `case` (E060).
-* `case` duplicados de literal (E061).
-
-### Ternario `cond ? a : b`
-
-* Condición booleana (E040).
-* Tipo común de ramas (E070 si incompatibles).
-* `null` permitido hacia tipos de referencia/array (regla de asignabilidad).
-
-> Los códigos y mensajes se centralizan en `errors.py` y en `semantic_visitor.py`.
-
----
-
-## 7) Flujo interno (cómo está implementado)
-
-**Pass 1 – `SymbolCollector`**
-
-* Construye la **tabla de símbolos**: stack de `Scope` (`scope.py`), con `define()` y `resolve()`.
-* Declara variables/const (con o sin anotación), funciones (firma `FunctionType` con parámetros y retorno) y clases (`ClassSymbol` con `fields` y `methods`).
-* En clases: resuelve herencia (base, ciclos, merge de miembros, verificación de overrides).
-* Enlaza cada `ctx` del árbol con su `scope` para que Pass 2 pueda entrar al ámbito correcto.
-
-**Pass 2 – `TypeCheckerVisitor`**
-
-* Entra a los scopes guardados (global, función, bloque, clase).
-* Resuelve nombres y **tipa expresiones**.
-* Implementa sufijos en `leftHandSide`: llamadas `()`, indexación `[]`, acceso `.`.
-* Aplica todas las reglas semánticas listadas arriba y reporta errores con línea/columna.
-
----
-
-## 8) Consejos y solución de problemas
-
-* **`ModuleNotFoundError` (gen)**
-
-  * Asegúrate de generar en `program/gen` (usa `-Xexact-output-dir`) y crea `program/__init__.py` y `program/gen/__init__.py`.
-* **`405 Method Not Allowed` en `/analyze`**
-
-  * Monta estáticos en `/static` y sirve `GET /` con un handler (el server ya viene así).
-* **IDE devuelve error JSON con atributos diferentes**
-
-  * El `server.py` adapta distintos formatos de errores (`line/lineno`, `column/col`, etc.). Si personalizas `errors.py`, mantén esos nombres o el adaptador.
-* **Ejecución del driver**
-
-  * Usa `python -m program.Driver ...` y ejecuta desde la **raíz** del repo.
-
----
-
-## 9) Lenguaje (subset soportado)
-
-Incluye tipos primitivos (`integer`, `string`, `boolean`, `null`), arreglos `T[]`, funciones con parámetros tipados y retorno, clases con constructor y métodos, `this`, herencia, control de flujo (`if/else`, `while`, `do-while`, `for`, `foreach`, `break/continue`, `return`), `switch/case`, `try/catch`, operadores aritméticos/lógicos y ternario.
-
-> Los archivos fuente usan extensión **`.cps`**.
+1. **Argumentos**: Push en orden inverso (derecha a izquierda)
+2. **Llamada**: `call function, n_args`
+3. **Limpieza**: `SP = SP + (n_args * 4)`
+4. **Retorno**: `pop result`
