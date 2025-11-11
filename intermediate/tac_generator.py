@@ -472,11 +472,38 @@ class TACGenerator(CompiscriptVisitor):
         # Caso A: asignación a índice de arreglo:  <id> '[' expr ']'
         if suffixes and suffixes[-1].getChild(0).getText() == '[':
             array_name = self._id(base_atom)  # nombre del arreglo
-            array_op = self._make_variable(array_name)
+            sym = self.current_scope.resolve(array_name)
+            
+            # --- LÓGICA DE RESOLUCIÓN (NUEVA) ---
+            array_op = None
+            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
+                # Es local/param (ej: FP[40])
+                array_op = TACOperand(f"FP[{sym.offset}]")
+            elif array_name in self.global_addrs:
+                # Es global (ej: 0x1028)
+                array_op = TACOperand(self.global_addrs[array_name])
+            else:
+                # Fallback (aunque no debería pasar si el type-checker funcionó)
+                array_op = self._make_variable(array_name) 
+            # --- FIN LÓGICA NUEVA ---
+
             index = self.visit(suffixes[-1].expression())
+            
+            # --- CORRECCIÓN IMPORTANTE ---
+            # Si el array_op es una dirección (FP[] o 0x...),
+            # primero debemos cargarlo a un temporal.
+            if str(array_op).startswith("FP[") or str(array_op).startswith("0x"):
+                temp_base = self.program.new_temp()
+                self.program.emit(TACOp.DEREF, result=temp_base, arg1=array_op)
+                array_op = temp_base # Ahora usamos el temporal
+            # --- FIN CORRECCIÓN ---
+            
             self.program.emit(TACOp.ARRAY_ASSIGN, array_op, index, rhs)
             self._free_if_temp(index, rhs)
-            return array_op  # valor de la expr es el lvalue (no se usa en stmt, pero ok)
+            if self._is_temp(array_op): # Liberar el temp_base si lo creamos
+                 self._free_if_temp(array_op)
+
+            return array_op
 
         # Caso B: identificador simple
         if not suffixes and hasattr(base_atom, "Identifier"):

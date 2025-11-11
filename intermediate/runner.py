@@ -10,12 +10,17 @@ from semantic.errors import ErrorCollector
 from .tac_generator import TACGenerator
 from .tac import TACProgram
 
+from semantic.scope import Scope 
+
 @dataclass
 class IntermediateResult:
     """Resultado de la generación de código intermedio"""
     tac_program: Optional[TACProgram]
     errors: list
     has_errors: bool
+
+    # --- Campos con default DESPUÉS ---
+    global_scope: Optional[Scope] = None
     
     def get_tac_code(self) -> str:
         """Obtiene el código TAC como string"""
@@ -51,6 +56,7 @@ def generate_intermediate_code(tree) -> IntermediateResult:
     if errors.has_errors():
         return IntermediateResult(
             tac_program=None,
+            global_scope=symbol_collector.global_scope, 
             errors=errors.errors,
             has_errors=True
         )
@@ -65,6 +71,7 @@ def generate_intermediate_code(tree) -> IntermediateResult:
         
         return IntermediateResult(
             tac_program=tac_program,
+            global_scope=symbol_collector.global_scope, 
             errors=[],
             has_errors=False
         )
@@ -73,6 +80,7 @@ def generate_intermediate_code(tree) -> IntermediateResult:
         errors.report(0, 0, "TAC_ERROR", f"Error generando código intermedio: {str(e)}")
         return IntermediateResult(
             tac_program=None,
+            global_scope=symbol_collector.global_scope, 
             errors=errors.errors,
             has_errors=True
         )

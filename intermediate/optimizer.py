@@ -55,19 +55,40 @@ class TACOptimizer:
         surgical_count = len(instructions)
         print(f"   Eliminadas {original_count - surgical_count} instrucciones redundantes")
         
-        # ========== FASE 3: Limpieza y pases finales ==========
+# ========== FASE 3: Limpieza y pases finales ==========
         print("🧹 Fase 3: Limpieza final...")
+        
+        print("   -> (3.1) Copy propagation...")
         instructions = self.copy_propagation(instructions)
-        # Nuevos pases de limpieza/afinado
+        
+        print("   -> (3.2) Constant cleanup...")
         instructions = self.constant_cleanup(instructions)
+        
+        print("   -> (3.3) Remove unused constant loads...")
         instructions = self.remove_unused_constant_loads(instructions)
+        
+        print("   -> (3.4) Optimize memory loads...")
         instructions = self.optimize_memory_loads(instructions)
+        
+        print("   -> (3.5) Eliminate copy chains...")
         instructions = self.eliminate_copy_chains(instructions)
+        
+        print("   -> (3.6) Remove redundant stores...")
         instructions = self.remove_redundant_stores(instructions)
+        
+        print("   -> (3.7) Dead code elimination...")
         instructions = self.dead_code_elimination(instructions)
+        
+        print("   -> (3.8) Remove redundant moves...")
         instructions = self.remove_redundant_moves(instructions)
+        
+        print("   -> (3.9) Strength reduction...")
         instructions = self.strength_reduction(instructions)
+        
+        print("   -> (3.10) Remove redundant jumps...")
         instructions = self.remove_redundant_jumps(instructions)
+        
+        print("   -> (3.11) Limpieza final terminada.")
 
         out = TACProgram()
         out.instructions = instructions
@@ -403,7 +424,7 @@ class TACOptimizer:
                 inst.arg1 and _is_temp_name(inst.arg1)):
                 src = str(inst.arg1)
                 dst = str(inst.result)
-                while src in copy_map:
+                while src in copy_map and copy_map[src] != src:
                     src = copy_map[src]
                 copy_map[dst] = src
                 result.append(inst)
@@ -452,6 +473,11 @@ class TACOptimizer:
             if inst.op in [TACOp.LABEL, TACOp.GOTO, TACOp.IF_TRUE, TACOp.IF_FALSE, 
                            TACOp.CALL, TACOp.FUNC_START, TACOp.FUNC_END]:
                 const_map.clear()
+                result.append(inst)
+                continue
+
+            # NUNCA sustituir en un DEREF
+            if inst.op == TACOp.DEREF:
                 result.append(inst)
                 continue
             
@@ -742,6 +768,11 @@ class TACOptimizer:
                 reset()
                 continue
 
+            # NUNCA sustituir en un DEREF, la dirección debe preservarse
+            if inst.op == TACOp.DEREF:
+                out.append(inst)
+                continue
+
             a1 = subst(inst.arg1)
             a2 = subst(inst.arg2)
             new_inst = TACInstruction(inst.op, inst.result, a1, a2)
@@ -843,8 +874,16 @@ class TACOptimizer:
                 out.append(inst); reset(); continue
 
             a1, a2 = inst.arg1, inst.arg2
-            if a1 is not None and not _is_const(a1): a1 = TACOperand(root(str(a1)))
-            if a2 is not None and not _is_const(a2): a2 = TACOperand(root(str(a2)))
+
+            # Proteger DEREF: NUNCA sustituir el arg1 de un DEREF
+            if inst.op != TACOp.DEREF:
+                if a1 is not None and not _is_const(a1): 
+                    a1 = TACOperand(root(str(a1)))
+
+            # arg2 siempre es seguro de sustituir
+            if a2 is not None and not _is_const(a2): 
+                a2 = TACOperand(root(str(a2)))
+
             new_inst = TACInstruction(inst.op, inst.result, a1, a2)
 
             if new_inst.result is not None:
