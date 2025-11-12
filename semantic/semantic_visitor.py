@@ -469,9 +469,23 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.errors = errors
         self.current = root_scope
         self.scopes_by_ctx = scopes_by_ctx
+        self.types_by_ctx = {}
         self.func_ret_stack = []
         self.loop_depth = 0
         self.current_class_stack = []  # nombre de clase actual si estamos dentro de un método
+
+    # printStatement: 'print' '(' expression ')' ';'
+    def visitPrintStatement(self, ctx: CompiscriptParser.PrintStatementContext):
+        # Solo necesitamos visitar la expresión para que se
+        # calcule y guarde su tipo en self.types_by_ctx
+        if ctx.expression():
+            self.visit(ctx.expression())
+        return None
+    
+    def _set_type(self, ctx: ParserRuleContext, typ: Type) -> Type:
+        """Guarda el tipo para este nodo de contexto y lo retorna."""
+        self.types_by_ctx[ctx] = typ
+        return typ
 
     def _enter_by_ctx(self, ctx: ParserRuleContext):
         s = self.scopes_by_ctx.get(ctx)
@@ -492,11 +506,11 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         conditionalExpr:
             logicalOrExpr ('?' expression ':' expression)?  # TernaryExpr
         """
-        cond_t = ctx.logicalOrExpr().accept(self)
+        cond_t = self.visit(ctx.logicalOrExpr())
 
         # Si no hay '?', el valor es el de logicalOrExpr
         if len(ctx.expression()) == 0:
-            return cond_t
+            return self._set_type(ctx, cond_t)
 
         # Con ternario: validar condición y calcular tipo común
         if cond_t != BOOLEAN:
@@ -508,20 +522,20 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
         # Regla de "tipo común": si uno es asignable al otro, el resultado es el más específico.
         if self._is_assignable(t_then, t_else):
-            return t_else
+            return self._set_type(ctx, t_else)
         if self._is_assignable(t_else, t_then):
-            return t_then
+            return self._set_type(ctx, t_then)
 
         # Soporte extra: permitir NULL hacia ref/array/función (si no lo cubre _is_assignable)
         if t_then == NULL and t_else != NULL:
-            return t_else
+            return self._set_type(ctx, t_else)
         if t_else == NULL and t_then != NULL:
-            return t_then
+            return self._set_type(ctx, t_then)
 
         # Incompatible
         self.errors.report(ctx.start.line, ctx.start.column, "E070",
                         f"Ramas incompatibles en ternario: '{t_then}' vs '{t_else}'.")
-        return NULL
+        return self._set_type(ctx, NULL)
 
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
@@ -620,7 +634,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
     # initializer: '=' expression
     def visitInitializer(self, ctx: CompiscriptParser.InitializerContext):
-        return self.visit(ctx.expression())
+        return self._set_type(ctx, self.visit(ctx.expression()))
 
     # assignment (statement):
     #   Identifier '=' expression ';'
@@ -665,36 +679,40 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.visit(ctx.expression()); return None
 
     # ---- Expresiones ----
+    # expression: assignmentExpr;
     def visitExpression(self, ctx: CompiscriptParser.ExpressionContext):
-        return self.visitChildren(ctx)
+        # Visita al hijo (assignmentExpr) y guarda su tipo
+        # en el contexto de ESTA expresión
+        child_type = self.visit(ctx.assignmentExpr())
+        return self._set_type(ctx, child_type)
 
     def visitLiteralExpr(self, ctx: CompiscriptParser.LiteralExprContext):
         txt = ctx.getText()
-        if txt == "true" or txt == "false": return BOOLEAN
-        if txt == "null": return NULL
+        if txt == "true" or txt == "false": return self._set_type(ctx, BOOLEAN)
+        if txt == "null": return self._set_type(ctx, NULL)
         if len(txt) >= 2 and ((txt[0] == '"' and txt[-1] == '"') or (txt[0] == "'" and txt[-1] == "'")):
-            return STRING
-        if txt.lstrip("-").isdigit(): return INTEGER
+            return self._set_type(ctx, STRING)
+        if txt.lstrip("-").isdigit(): return self._set_type(ctx, INTEGER)
         return NULL
 
     # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
     def visitPrimaryExpr(self, ctx: CompiscriptParser.PrimaryExprContext):
         # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
         if ctx.literalExpr() is not None:
-            return self.visit(ctx.literalExpr())
+            return self._set_type(ctx, self.visit(ctx.literalExpr()))
         if ctx.leftHandSide() is not None:
-            return self.visit(ctx.leftHandSide())
+            return self._set_type(ctx, self.visit(ctx.leftHandSide()))
         if ctx.expression() is not None:
             # caso paréntesis: devolver el tipo de la expresión interna
-            return self.visit(ctx.expression())
-        return NULL
+            return self._set_type(ctx, self.visit(ctx.expression()))
+        return self._set_type(ctx, NULL)
 
     # leftHandSide: primaryAtom (suffixOp)* ;
     def visitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
         t = self.visit(ctx.primaryAtom())
         for s in ctx.suffixOp():
             t = self._suffix_apply_by_token(s, t)
-        return t
+        return self._set_type(ctx, t)
 
     # primaryAtom:
     #   Identifier           # IdentifierExpr
@@ -705,8 +723,8 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         sym = self.current.resolve(name)
         if not sym:
             self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
-            return NULL
-        return sym.typ
+            return self._set_type(ctx, NULL)
+        return self._set_type(ctx, sym.typ)
 
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         cname = ctx.Identifier().getText()
@@ -717,7 +735,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             # clase no declarada
             for e in args: self.visit(e)  # igual tipamos args para propagar
             self.errors.report(ctx.start.line, ctx.start.column, "E037", f"Clase '{cname}' no declarada.")
-            return ClassType(cname)  # devolvemos el tipo para no cascada de errores
+            return self._set_type(ctx, ClassType(cname))  # devolvemos el tipo para no cascada de errores
 
         ctor = csym.methods.get("constructor")
         if not ctor:
@@ -728,7 +746,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             else:
                 # nada que validar
                 pass
-            return ClassType(cname)
+            return self._set_type(ctx, ClassType(cname))
 
         # validar aridad
         if len(args) != len(ctor.params):
@@ -741,14 +759,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if not self._is_assignable(actual, expected):
                     self.errors.report(e.start.line, e.start.column, "E022",
                                     f"Arg {i+1} en constructor de '{cname}': '{actual}' no asignable a '{expected}'.")
-        return ClassType(cname)
+        return self._set_type(ctx, ClassType(cname))
 
 
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         if not self.current_class_stack:
             self.errors.report(ctx.start.line, ctx.start.column, "E043", "this no puede usarse fuera de un método de clase.")
-            return NULL
-        return ClassType(self.current_class_stack[-1])
+            return self._set_type(ctx, NULL)
+        return self._set_type(ctx, ClassType(self.current_class_stack[-1]))
 
     # foreach (...) { ... }  
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
@@ -774,69 +792,74 @@ class TypeCheckerVisitor(CompiscriptVisitor):
     def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
         exprs = ctx.expression()
         if not exprs:
-            return ArrayType(NULL)
+            return self._set_type(ctx, ArrayType(NULL))
         t0 = self.visit(exprs[0])
         for e in exprs[1:]:
             ti = self.visit(e)
             if t0.name != ti.name:
                 self.errors.report(ctx.start.line, ctx.start.column, "E011",
                                    f"Elementos de arreglo deben tener mismo tipo: {t0} vs {ti}.")
-        return ArrayType(t0)
+        return self._set_type(ctx, ArrayType(t0))
 
     # logical OR/AND
     def visitLogicalOrExpr(self, ctx: CompiscriptParser.LogicalOrExprContext):
         n = len(ctx.logicalAndExpr())
         if n == 1:
-            return ctx.logicalAndExpr(0).accept(self)
-        for i in range(n):
-            t = ctx.logicalAndExpr(i).accept(self)
+            child_t = self.visit(ctx.logicalAndExpr(0)) # <--- ARREGLADO
+            return self._set_type(ctx, child_t)
+        for i in range(n):  
+            t = self.visit(ctx.logicalAndExpr(i)) # <--- ARREGLADO
             if t != BOOLEAN:
                 self._op_err(ctx, "||", t, "boolean")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     def visitLogicalAndExpr(self, ctx: CompiscriptParser.LogicalAndExprContext):
         n = len(ctx.equalityExpr())
         if n == 1:
-            return ctx.equalityExpr(0).accept(self)
+            child_t = self.visit(ctx.equalityExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
         for i in range(n):
-            t = ctx.equalityExpr(i).accept(self)
+            t = self.visit(ctx.equalityExpr(i)) # Usar visit()
             if t != BOOLEAN:
                 self._op_err(ctx, "&&", t, "boolean")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # ==, !=
     def visitEqualityExpr(self, ctx: CompiscriptParser.EqualityExprContext):
         n = len(ctx.relationalExpr())
         if n == 1:
-            return ctx.relationalExpr(0).accept(self)
-        left = ctx.relationalExpr(0).accept(self)
+            child_t = self.visit(ctx.relationalExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
+        left = self.visit(ctx.relationalExpr(0)) # Usar visit()
         for i in range(1, n):
-            right = ctx.relationalExpr(i).accept(self)
+            right = self.visit(ctx.relationalExpr(i)) # Usar visit()
             if not self._eq_compatible(left, right):
                 self._op_err(ctx, "==/!=", f"{left} vs {right}")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # <,<=,>,>=  (integer)
     def visitRelationalExpr(self, ctx: CompiscriptParser.RelationalExprContext):
         n = len(ctx.additiveExpr())
         if n == 1:
-            return ctx.additiveExpr(0).accept(self)
-        t0 = ctx.additiveExpr(0).accept(self)
+            child_t = self.visit(ctx.additiveExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
+        t0 = self.visit(ctx.additiveExpr(0)) # Usar visit()
         for i in range(1, n):
-            ti = ctx.additiveExpr(i).accept(self)
+            ti = self.visit(ctx.additiveExpr(i)) # Usar visit()
             if t0 != INTEGER or ti != INTEGER:
                 self._op_err(ctx, "relacional", f"{t0} y {ti}", "integer")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # +, -
     def visitAdditiveExpr(self, ctx: CompiscriptParser.AdditiveExprContext):
         n = len(ctx.multiplicativeExpr())
         if n == 1:
-            return ctx.multiplicativeExpr(0).accept(self)
+            child_t = self.visit(ctx.multiplicativeExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
 
-        res = ctx.multiplicativeExpr(0).accept(self)
+        res = self.visit(ctx.multiplicativeExpr(0)) # Usar visit()
         for i in range(1, n):
-            t = ctx.multiplicativeExpr(i).accept(self)
+            t = self.visit(ctx.multiplicativeExpr(i)) # Usar visit()
             # Si aparece string en una suma/resta:
             if res == STRING or t == STRING:
                 # Permitimos concatenación si todos son string; si hay mezcla, error
@@ -848,31 +871,35 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if res != INTEGER or t != INTEGER:
                     self._op_err(ctx, "+/-", f"{res} y {t}", "integer")
                 res = INTEGER
-        return res
+        return self._set_type(ctx, res)
 
     # *, /, %
     def visitMultiplicativeExpr(self, ctx: CompiscriptParser.MultiplicativeExprContext):
         n = len(ctx.unaryExpr())
         if n == 1:
-            return ctx.unaryExpr(0).accept(self)
+            child_t = self.visit(ctx.unaryExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
         for i in range(n):
-            t = ctx.unaryExpr(i).accept(self)
+            t = self.visit(ctx.unaryExpr(i)) # Usar visit()
             if t != INTEGER:
                 self._op_err(ctx, "*,/,%", t, "integer")
-        return INTEGER
+        return self._set_type(ctx, INTEGER)
 
     # !  y  - (unario)
     def visitUnaryExpr(self, ctx: CompiscriptParser.UnaryExprContext):
         if ctx.getChildCount() == 2:
             op = ctx.getChild(0).getText()
-            t  = ctx.getChild(1).accept(self)
+            t  = self.visit(ctx.getChild(1)) # Usar visit()
             if op == '!':
                 if t != BOOLEAN: self._op_err(ctx, "!", t, "boolean")
-                return BOOLEAN
+                return self._set_type(ctx, BOOLEAN)
             if op == '-':
                 if t != INTEGER: self._op_err(ctx, "neg", t, "integer")
-                return INTEGER
-        return self.visitChildren(ctx)
+                return self._set_type(ctx, INTEGER)
+        
+        # Passthrough (ej: primaryExpr)
+        child_t = self.visit(ctx.primaryExpr())
+        return self._set_type(ctx, child_t)
 
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
         # Tipo del switch(expr)

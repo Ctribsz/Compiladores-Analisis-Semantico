@@ -670,7 +670,7 @@ _print_string:
     # NOTA: No imprimimos newline aquí, 'print' de Compiscript sí lo hace.
     # Si 'print' debe imprimir newline, la llamada MIPS debe ser:
     #   jal _print_string
-    #   jal _print_newline
+    jal _print_newline
     
     lw $a0, 0($sp)        # Restaurar $a0
     lw $ra, 4($sp)        # Restaurar return address
