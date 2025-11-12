@@ -501,12 +501,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self._exit()
         return r
 
+    # ****** INICIO DE CAMBIOS ******
+    
     def visitTernaryExpr(self, ctx: CompiscriptParser.TernaryExprContext):
         """
         conditionalExpr:
             logicalOrExpr ('?' expression ':' expression)?  # TernaryExpr
         """
-        cond_t = self.visit(ctx.logicalOrExpr())
+        cond_t = self.visit(ctx.logicalOrExpr()) # <--- ARREGLADO (visit)
 
         # Si no hay '?', el valor es el de logicalOrExpr
         if len(ctx.expression()) == 0:
@@ -520,13 +522,11 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         t_then = self.visit(ctx.expression(0))
         t_else = self.visit(ctx.expression(1))
 
-        # Regla de "tipo común": si uno es asignable al otro, el resultado es el más específico.
+        # Regla de "tipo común"
         if self._is_assignable(t_then, t_else):
             return self._set_type(ctx, t_else)
         if self._is_assignable(t_else, t_then):
             return self._set_type(ctx, t_then)
-
-        # Soporte extra: permitir NULL hacia ref/array/función (si no lo cubre _is_assignable)
         if t_then == NULL and t_else != NULL:
             return self._set_type(ctx, t_else)
         if t_else == NULL and t_then != NULL:
@@ -535,7 +535,10 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         # Incompatible
         self.errors.report(ctx.start.line, ctx.start.column, "E070",
                         f"Ramas incompatibles en ternario: '{t_then}' vs '{t_else}'.")
-        return self._set_type(ctx, NULL)
+        return self._set_type(ctx, NULL) # <--- ARREGLADO (wrapper)
+
+    # ****** FIN DE CAMBIOS ******
+
 
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
@@ -648,20 +651,20 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if name is None:
                 self.errors.report(ctx.start.line, ctx.start.column, "E006",
                                    "Asignación inválida (identificador esperado).")
-                return NULL
+                return self._set_type(ctx, NULL)
             sym = self.current.resolve(name)
             if not sym:
                 self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
-                return NULL
+                return self._set_type(ctx, NULL)
             if sym.is_const:
                 self.errors.report(ctx.start.line, ctx.start.column, "E005", f"No se puede reasignar const '{name}'.")
-                return sym.typ
+                return self._set_type(ctx, sym.typ)
             if not self._is_assignable(rtype, sym.typ):
                 self.errors.report(ctx.start.line, ctx.start.column, "E004",
                                    f"No se puede asignar '{rtype}' a '{sym.typ}'.")
             else:
                 sym.initialized = True
-            return sym.typ
+            return self._set_type(ctx, sym.typ)
         else:
             # assignment: expression '.' Identifier '=' expression ';'
             obj_t = self.visit(ctx.expression(0))           # tipo del objeto
@@ -672,7 +675,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if not self._is_assignable(rhs_t, prop_t):
                 self.errors.report(ctx.start.line, ctx.start.column, "E004",
                                 f"No se puede asignar '{rhs_t}' a '{prop_t}'.")
-            return prop_t
+            return self._set_type(ctx, prop_t)
 
     # expressionStatement: expression ';'
     def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
@@ -685,6 +688,34 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         # en el contexto de ESTA expresión
         child_type = self.visit(ctx.assignmentExpr())
         return self._set_type(ctx, child_type)
+
+    # ****** INICIO DE CAMBIOS ******
+
+    # (AÑADIR ESTE MÉTODO a TypeCheckerVisitor)
+    # assignmentExpr: lhs=leftHandSide op='=' rhs=assignmentExpr | conditionalExpr;
+    def visitAssignmentExpr(self, ctx: CompiscriptParser.AssignmentExprContext):
+        if ctx.conditionalExpr():
+            # Es un passthrough (no asignación), ej: 'i'
+            # El 'conditionalExpr' es visitado por 'visitTernaryExpr'
+            typ = self.visit(ctx.conditionalExpr())
+        else:
+            # Es una asignación, ej: 'a = 5'
+            # (El chequeo de tipo para la asignación real se hace en 
+            # 'visitAssignment' (statement) y 'visitAssignExpr' (TAC).
+            # Aquí solo necesitamos propagar el tipo de la expresión.)
+            typ = self.visit(ctx.assignmentExpr()) # Visita el RHS
+
+        return self._set_type(ctx, typ)
+
+    # (AÑADIR ESTE MÉTODO a TypeCheckerVisitor)
+    def visitExprNoAssign(self, ctx: CompiscriptParser.ExprNoAssignContext):
+        """Visita expresión sin asignación"""
+        # (Esto asume que el hijo es conditionalExpr, como en tac_generator.py)
+        typ = self.visit(ctx.conditionalExpr())
+        return self._set_type(ctx, typ)
+
+    # ****** FIN DE CAMBIOS ******
+
 
     def visitLiteralExpr(self, ctx: CompiscriptParser.LiteralExprContext):
         txt = ctx.getText()
@@ -801,14 +832,16 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                                    f"Elementos de arreglo deben tener mismo tipo: {t0} vs {ti}.")
         return self._set_type(ctx, ArrayType(t0))
 
+    # ****** INICIO DE CAMBIOS ******
+
     # logical OR/AND
     def visitLogicalOrExpr(self, ctx: CompiscriptParser.LogicalOrExprContext):
         n = len(ctx.logicalAndExpr())
         if n == 1:
-            child_t = self.visit(ctx.logicalAndExpr(0)) # <--- ARREGLADO
-            return self._set_type(ctx, child_t)
-        for i in range(n):  
-            t = self.visit(ctx.logicalAndExpr(i)) # <--- ARREGLADO
+            child_t = self.visit(ctx.logicalAndExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
+        for i in range(n):
+            t = self.visit(ctx.logicalAndExpr(i)) # Usar visit()
             if t != BOOLEAN:
                 self._op_err(ctx, "||", t, "boolean")
         return self._set_type(ctx, BOOLEAN)
@@ -901,6 +934,8 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         child_t = self.visit(ctx.primaryExpr())
         return self._set_type(ctx, child_t)
 
+    # ****** FIN DE CAMBIOS ******
+
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
         # Tipo del switch(expr)
         switch_t = self.visit(ctx.expression())
@@ -991,7 +1026,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                     self.visit(e)
             self.errors.report(sctx.start.line, sctx.start.column, "E020",
                             f"Llamada sobre no-función '{callee_type}'.")
-            return NULL
+            return self._set_type(sctx, NULL)
 
         args = sctx.arguments().expression() if sctx.arguments() else []
         if len(args) != len(callee_type.params):
@@ -1004,7 +1039,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if not self._is_assignable(actual, expected):
                     self.errors.report(e.start.line, e.start.column, "E022",
                                     f"Arg {i+1}: '{actual}' no asignable a '{expected}'.")
-        return callee_type.ret
+        return self._set_type(sctx, callee_type.ret)
 
 
     def _apply_index(self, sctx: CompiscriptParser.IndexExprContext, base_type: Type) -> Type:
@@ -1014,12 +1049,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         if not isinstance(base_type, ArrayType):
             self.errors.report(sctx.start.line, sctx.start.column, "E031",
                             f"Indexación solo en arreglos, no en '{base_type}'.")
-            return NULL
-        return base_type.elem
+            return self._set_type(sctx, NULL)
+        return self._set_type(sctx, base_type.elem)
 
     def _apply_prop(self, sctx: CompiscriptParser.PropertyAccessExprContext, base_type: Type) -> Type:
         prop = sctx.Identifier().getText()
-        return self._resolve_property_type(base_type, prop, sctx)
+        # _resolve_property_type ya retorna NULL en error, así que solo envolvemos la llamada
+        prop_type = self._resolve_property_type(base_type, prop, sctx)
+        return self._set_type(sctx, prop_type) # <--- CAMBIO
 
     
     # helper interno (añádelo en TypeCheckerVisitor)
