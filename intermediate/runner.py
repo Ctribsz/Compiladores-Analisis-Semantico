@@ -65,7 +65,8 @@ def generate_intermediate_code(tree) -> IntermediateResult:
     try:
         tac_gen = TACGenerator(
             symbol_collector.global_scope,
-            symbol_collector.scopes_by_ctx
+            symbol_collector.scopes_by_ctx,
+            type_checker.types_by_ctx
         )
         tac_program = tac_gen.visit(tree)
         

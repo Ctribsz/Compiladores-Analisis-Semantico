@@ -16,11 +16,12 @@ from .tac import TACOp, TACOperand, TACInstruction, TACProgram
 class TACGenerator(CompiscriptVisitor):
     """Generador de código TAC desde el AST de Compiscript"""
     
-    def __init__(self, global_scope: Scope, scopes_by_ctx: dict):
+    def __init__(self, global_scope: Scope, scopes_by_ctx: dict, types_by_ctx: dict):
         self.program = TACProgram()
         self.global_scope = global_scope
         self.current_scope = global_scope
         self.scopes_by_ctx = scopes_by_ctx
+        self.types_by_ctx = types_by_ctx
         
         # Stack para manejar break/continue
         self.loop_stack = []
@@ -333,6 +334,30 @@ class TACGenerator(CompiscriptVisitor):
         else:
             self.program.emit(TACOp.RETURN)
         return None
+    
+    def visitPrintStatement(self, ctx: CompiscriptParser.PrintStatementContext):
+            """Genera código para print (con tipo)"""
+            # value_op puede ser un string 'tK' o un TACOperand
+            value_op = self.visit(ctx.expression())
+            
+            # --- LÍNEA DE DEFENSA ---
+            # Usamos _make_operand para asegurar que value_to_print sea un objeto
+            value_to_print = self._make_operand(value_op)
+
+            # --- LÓGICA DE TIPO ---
+            # Obtener el tipo que el TypeChecker (Fase 1) calculó
+            expr_type = self.types_by_ctx.get(ctx.expression(), None)
+            
+            # Asignar el tipo (como string) al operando TAC
+            if expr_type:
+                value_to_print.typ = str(expr_type)
+            # --- FIN LÓGICA DE TIPO ---
+            
+            self.program.emit(TACOp.PRINT, arg1=value_to_print)
+            
+            # Liberamos el temporal usando el 'value_op' original (que podría ser str)
+            self._free_if_temp(value_op)
+            return None
     
     # ========== SWITCH STATEMENT ==========
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):

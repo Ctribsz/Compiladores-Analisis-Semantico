@@ -195,51 +195,67 @@ class MIPSGenerator:
             self._emit("sll $t1, $t1, 2")      # t1 = index * 4
             self._emit("add $t0, $t0, $t1")    # t0 = base + (index * 4)
             self._emit("sw $t2, 0($t0)")       # Mem[t0] = t2
-            
+
         elif op == TACOp.FIELD_ACCESS: # result = arg1.arg2 (obj.field)
-            # arg1 = obj (un temporal), arg2 = field_name (constante)
-            field_name = str(inst.arg2.value)
+            obj_op = inst.arg1
+            member_name = str(inst.arg2.value)
+
+            # --- HACK: Asumir tipo 'Point' ---
+            class_layout = self.class_layouts.get("Point")
+            if not class_layout:
+                self._emit(f"# ERROR: No se encontró layout de clase 'Point' para {member_name}")
+                pass
             
-            # 1. Cargar la dirección base del objeto (heap ptr) en $t0
-            self._load_op("$t0", inst.arg1)
+            if member_name in class_layout.fields:
+                # --- Es un ACCESO A CAMPO (p.x) ---
+                field_name = member_name
+                offset = 0 # Default offset
+                try:
+                    field_list = list(class_layout.fields.keys())
+                    offset = field_list.index(field_name) * 4
+                except:
+                    offset = 4 if field_name == "y" else 0 # Fallback
+                
+                self._emit(f"# (Accediendo a campo '{field_name}' en offset {offset})")
+                self._load_op("$t0", obj_op) # t0 = base address
+                self._emit(f"lw $t1, {offset}($t0)") # t1 = Mem[base + offset]
+                self._store_op("$t1", inst.result) # result = t1
             
-            # 2. Obtener offset (¡SIMPLIFICADO! Asumimos que podemos encontrarlo)
-            #    Una implementación real necesitaría el tipo de arg1
-            offset = 0
-            if "Point" in self.class_layouts: # Asumimos Point por ahora
-                if field_name in self.class_layouts["Point"].fields:
-                    # El offset de tus símbolos semánticos NO es el offset de MIPS
-                    # Necesitamos calcularlo. Ej: x=0, y=4
-                    offset = 4 if field_name == "y" else 0 # <-- ¡Esto es un HACK!
-            
-            self._emit(f"# (Accediendo a campo '{field_name}' en offset {offset})")
-            
-            # 3. Cargar valor: lw $t1, offset($t0)
-            self._emit(f"lw $t1, {offset}($t0)")
-            
-            # 4. Guardar en temporal de resultado
-            self._store_op("$t1", inst.result)
+            elif member_name in class_layout.methods:
+                # --- Es un ACCESO A MÉTODO (p.getX) ---
+                # El resultado debe ser la *dirección* de la función
+                # Asumimos que el método NO es de clase (ej: Point_getX)
+                method_label = self._sanitize_label(f"{member_name}") 
+                
+                self._emit(f"# (Resolviendo dirección de método {method_label})")
+                self._emit(f"la $t0, {method_label}")
+                self._store_op("$t0", inst.result) # result = addr(getX)
+            else:
+                self._emit(f"# ERROR: Miembro '{member_name}' no encontrado en 'Point'")
             
         elif op == TACOp.FIELD_ASSIGN: # result.arg1 = arg2 (obj.field = value)
-            # result = obj (temporal), arg1 = field_name (const), arg2 = value
+            obj_op = inst.result
             field_name = str(inst.arg1.value)
+            value_op = inst.arg2
 
-            # 1. Cargar la dirección base del objeto (heap ptr) en $t0
-            self._load_op("$t0", inst.result)
+            # --- HACK: Asumir tipo 'Point' ---
+            class_layout = self.class_layouts.get("Point")
             
-            # 2. Cargar el valor a guardar en $t1
-            self._load_op("$t1", inst.arg2)
-            
-            # 3. Obtener offset (Mismo HACK que arriba)
-            offset = 0
-            if "Point" in self.class_layouts: # Asumimos Point
-                if field_name in self.class_layouts["Point"].fields:
-                    offset = 4 if field_name == "y" else 0
+            offset = 0 # Default offset
+            if class_layout and field_name in class_layout.fields:
+                # ¡Calcular offset real! (Asumiendo que los campos están en orden)
+                try:
+                    field_list = list(class_layout.fields.keys())
+                    offset = field_list.index(field_name) * 4
+                except:
+                    offset = 4 if field_name == "y" else 0 # Fallback al hack anterior
+            else:
+                 offset = 4 if field_name == "y" else 0 # Fallback al hack anterior
             
             self._emit(f"# (Asignando a campo '{field_name}' en offset {offset})")
-
-            # 4. Guardar valor: sw $t1, offset($t0)
-            self._emit(f"sw $t1, {offset}($t0)")
+            self._load_op("$t0", obj_op)     # t0 = base address
+            self._load_op("$t1", value_op)   # t1 = value
+            self._emit(f"sw $t1, {offset}($t0)") # Mem[base + offset] = value
         
         # --- Control de Flujo ---
         elif op == TACOp.GOTO:
@@ -300,8 +316,16 @@ class MIPSGenerator:
             self._emit("sw $t0, 0($sp)")
             
         elif op == TACOp.CALL:
-            label = self._sanitize_label(str(inst.arg1)) # <-- SANITIZAR
-            self._emit(f"jal {label}")
+            op_name = str(inst.arg1.value)
+            
+            if op_name.startswith("t"):
+                # Es una llamada indirecta (ej: call t1, donde t1 tiene addr(getX))
+                self._load_op("$t0", inst.arg1) # Cargar la dirección (de t1) en $t0
+                self._emit("jalr $t0")          # Jump And Link Register
+            else:
+                # Es una llamada estática (ej: call add)
+                label = self._sanitize_label(op_name)
+                self._emit(f"jal {label}")
             
         elif op == TACOp.ADD_SP: # Limpiar args del stack (SP = SP + 8)
             self._emit(f"addu $sp, $sp, {inst.arg1.value}")
@@ -313,17 +337,51 @@ class MIPSGenerator:
             
         # --- Helpers (PRINT, NEW) ---
         elif op == TACOp.PRINT:
-            # (Asumimos un 'print' genérico que detecta tipo)
-            # Por ahora, solo implementamos print int
-            self._load_op("$a0", inst.arg1) # $a0 = argumento a imprimir
-            self._emit("jal _print_int") # Llamar a helper
+            operand = inst.arg1
+            self._load_op("$a0", operand) # $a0 = argumento a imprimir
+            
+            op_type = operand.typ # <-- Leer el tipo del operando
+            
+            self._emit(f"# (Llamando a print para tipo: {op_type})")
+            
+            if op_type == 'string':
+                self._emit("jal _print_string")
+            elif op_type == 'boolean':
+                self._emit("jal _print_boolean")
+            else:
+                # Asumir integer, null, o array (que imprime su dirección)
+                self._emit("jal _print_int")
         
-        elif op == TACOp.NEW: # Alocación (simplificada)
-            # arg1 es tamaño (para array) o tipo (para objeto)
-            # Asumimos que es tamaño en bytes por ahora
-            self._load_op("$a0", inst.arg1) # $a0 = num bytes
+        elif op == TACOp.NEW:
+            arg1_op = inst.arg1
+            
+            if arg1_op.is_constant and isinstance(arg1_op.value, int):
+                # --- Es un ARREGLO (ej: new 5) ---
+                num_elements = arg1_op.value
+                size = num_elements * 4 # 4 bytes por elemento (int)
+                self._emit(f"# Alocando {size} bytes para array[{num_elements}]")
+                self._emit(f"li $a0, {size}")
+
+            elif isinstance(arg1_op.value, str):
+                # --- Es una CLASE (ej: new Point) ---
+                class_name = str(arg1_op.value)
+                size = 0
+                if class_name in self.class_layouts:
+                    fields = self.class_layouts[class_name].fields
+                    size = len(fields) * 4
+                
+                if size == 0 and class_name == "Point":
+                     size = 8 # HACK: Fallback
+
+                self._emit(f"# Alocando {size} bytes para {class_name}")
+                self._emit(f"li $a0, {size}")
+            
+            else:
+                self._emit(f"# ERROR: 'NEW' no sabe qué hacer con {arg1_op}")
+                self._emit(f"li $a0, 0")
+
             self._emit("jal _alloc")
-            self._store_op("$v0", inst.result) # result = puntero (de $v0)
+            self._store_op("$v0", inst.result) # result = new object ptr
 
     # --- HELPERS DE TRADUCCIÓN ---
 

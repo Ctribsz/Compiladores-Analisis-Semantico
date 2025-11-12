@@ -17,9 +17,12 @@ _false:   .asciiz "false"  # String para boolean false
     global_103c: .word 0
     
 # Literales de String
-    _str_0: .asciiz "x"
-    _str_1: .asciiz "y"
-    _str_2: .asciiz "getX"
+    _str_0: .asciiz "One"
+    _str_1: .asciiz "Two"
+    _str_2: .asciiz "Other"
+    _str_3: .asciiz "x"
+    _str_4: .asciiz "y"
+    _str_5: .asciiz "getX"
 
 # === SECCIÓN DE CÓDIGO ===
 
@@ -36,137 +39,137 @@ main:
     li $t0, 20
     la $at, global_1004
     sw $t0, 0($at)
-    # t3 = @0x1000
+    # t2 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t2 = @0x1004
+    # t1 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t1 = t3 add t2
+    # t3 = t2 add t1
     lw $t0, -4($fp)
     lw $t1, -8($fp)
     add $t2, $t0, $t1
     sw $t2, -12($fp)
-    # t1 = t3
+    # t3 = t2
     lw $t0, -4($fp)
     sw $t0, -12($fp)
-    # t2 = t3 add t3
+    # t1 = t2 add t2
     lw $t0, -4($fp)
     lw $t1, -4($fp)
     add $t2, $t0, $t1
     sw $t2, -8($fp)
-    # t1 = t2
+    # t3 = t1
     lw $t0, -8($fp)
     sw $t0, -12($fp)
-    # t3 = t2 div 5
+    # t2 = t1 div 5
     lw $t0, -8($fp)
     li $t1, 5
     div $t2, $t0, $t1
     sw $t2, -4($fp)
-    # t1 = t2 add t3
+    # t3 = t1 add t2
     lw $t0, -8($fp)
     lw $t1, -4($fp)
     add $t2, $t0, $t1
     sw $t2, -12($fp)
-    # t3 = t1 sub 3
+    # t2 = t3 sub 3
     lw $t0, -12($fp)
     li $t1, 3
     sub $t2, $t0, $t1
     sw $t2, -4($fp)
-    # t3 = t1
+    # t2 = t3
     lw $t0, -12($fp)
     sw $t0, -4($fp)
-    # t2 = t1 < t1
+    # t1 = t3 < t3
     lw $t0, -12($fp)
     lw $t1, -12($fp)
     slt $t2, $t0, $t1
     sw $t2, -8($fp)
-    # 0x1010 = t2
+    # 0x1010 = t1
     lw $t0, -8($fp)
     la $at, global_1010
     sw $t0, 0($at)
-    # t1 = t3
+    # t3 = t2
     lw $t0, -4($fp)
     sw $t0, -12($fp)
-    # t3 = t1 == 10
+    # t2 = t3 == 10
     lw $t0, -12($fp)
     li $t1, 10
     seq $t2, $t0, $t1
     sw $t2, -4($fp)
-    # ifFalse t3 goto L0
+    # ifFalse t2 goto L0
     lw $t0, -4($fp)
     beq $t0, $zero, L0
-    # t3 = @0x1004
+    # t2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = t3 != 0
+    # t3 = t2 != 0
     lw $t0, -4($fp)
     li $t1, 0
     sne $t2, $t0, $t1
     sw $t2, -12($fp)
-    # t2 = t1
+    # t1 = t3
     lw $t0, -12($fp)
     sw $t0, -8($fp)
     # goto L1
     j L1
     # L0:
 L0:
-    # t2 = false
+    # t1 = false
     li $t0, 0
     sw $t0, -8($fp)
     # L1:
 L1:
-    # 0x1014 = t2
+    # 0x1014 = t1
     lw $t0, -8($fp)
     la $at, global_1014
     sw $t0, 0($at)
-    # t1 = @0x1010
+    # t3 = @0x1010
     la $t0, global_1010
     lw $t1, 0($t0)
     sw $t1, -12($fp)
-    # t3 = !t1
+    # t2 = !t3
     lw $t0, -12($fp)
     seq $t0, $t0, $zero
     sw $t0, -4($fp)
-    # if t3 goto L2
+    # if t2 goto L2
     lw $t0, -4($fp)
     bne $t0, $zero, L2
-    # t3 = @0x1014
+    # t2 = @0x1014
     la $t0, global_1014
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t2 = t3
+    # t1 = t2
     lw $t0, -4($fp)
     sw $t0, -8($fp)
     # goto L3
     j L3
     # L2:
 L2:
-    # t2 = true
+    # t1 = true
     li $t0, 1
     sw $t0, -8($fp)
     # L3:
 L3:
-    # t2 = @0x1000
+    # t1 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t3 = @0x1004
+    # t2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = t2 < t3
+    # t3 = t1 < t2
     lw $t0, -8($fp)
     lw $t1, -4($fp)
     slt $t2, $t0, $t1
     sw $t2, -12($fp)
-    # ifFalse t1 goto L4
+    # ifFalse t3 goto L4
     lw $t0, -12($fp)
     beq $t0, $zero, L4
-    # t3 = @0x1000
+    # t2 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -4($fp)
@@ -174,7 +177,7 @@ L3:
     j L5
     # L4:
 L4:
-    # t3 = @0x1004
+    # t2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
@@ -186,32 +189,33 @@ L5:
     sw $t0, 0($at)
     # L6:
 L6:
-    # t3 = @0x101c
+    # t2 = @0x101c
     la $t0, global_101c
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t2 = t3 < 5
+    # t1 = t2 < 5
     lw $t0, -4($fp)
     li $t1, 5
     slt $t2, $t0, $t1
     sw $t2, -8($fp)
-    # ifFalse t2 goto L7
+    # ifFalse t1 goto L7
     lw $t0, -8($fp)
     beq $t0, $zero, L7
-    # t3 = @0x101c
+    # t2 = @0x101c
     la $t0, global_101c
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = t3
-    lw $t0, -4($fp)
-    sw $t0, -12($fp)
-    # t3 = t3 add 1
+    # print t2
+    lw $a0, -4($fp)
+    # (Llamando a print para tipo: None)
+    jal _print_int
+    # t3 = t2 add 1
     lw $t0, -4($fp)
     li $t1, 1
     add $t2, $t0, $t1
-    sw $t2, -4($fp)
+    sw $t2, -12($fp)
     # 0x101c = t3
-    lw $t0, -4($fp)
+    lw $t0, -12($fp)
     la $at, global_101c
     sw $t0, 0($at)
     # goto L6
@@ -224,31 +228,35 @@ L7:
     sw $t0, 0($at)
     # L8:
 L8:
-    # t2 = @0x1020
-    la $t0, global_1020
-    lw $t1, 0($t0)
-    sw $t1, -8($fp)
-    # t3 = t2 < 3
-    lw $t0, -8($fp)
-    li $t1, 3
-    slt $t2, $t0, $t1
-    sw $t2, -4($fp)
-    # ifFalse t3 goto L10
-    lw $t0, -4($fp)
-    beq $t0, $zero, L10
-    # t2 = @0x1020
-    la $t0, global_1020
-    lw $t1, 0($t0)
-    sw $t1, -8($fp)
     # t1 = @0x1020
     la $t0, global_1020
     lw $t1, 0($t0)
-    sw $t1, -12($fp)
-    # t2 = t1 add 1
+    sw $t1, -8($fp)
+    # t3 = t1 < 3
+    lw $t0, -8($fp)
+    li $t1, 3
+    slt $t2, $t0, $t1
+    sw $t2, -12($fp)
+    # ifFalse t3 goto L10
     lw $t0, -12($fp)
+    beq $t0, $zero, L10
+    # t1 = @0x1020
+    la $t0, global_1020
+    lw $t1, 0($t0)
+    sw $t1, -8($fp)
+    # print t1
+    lw $a0, -8($fp)
+    # (Llamando a print para tipo: None)
+    jal _print_int
+    # t1 = @0x1020
+    la $t0, global_1020
+    lw $t1, 0($t0)
+    sw $t1, -8($fp)
+    # t2 = t1 add 1
+    lw $t0, -8($fp)
     li $t1, 1
     add $t2, $t0, $t1
-    sw $t2, -8($fp)
+    sw $t2, -4($fp)
     # goto L8
     j L8
     # L10:
@@ -350,7 +358,8 @@ L12:
     addu $sp, $sp, 8
     # end_function max
     # t2 = new 5
-    li $a0, 5
+    # Alocando 20 bytes para array[5]
+    li $a0, 20
     jal _alloc
     sw $v0, -28($fp)
     # t2[0] = 1
@@ -505,10 +514,22 @@ L15:
     j L21
     # L19:
 L19:
+    # print "One"
+    la $a0, _str_0
+    # (Llamando a print para tipo: string)
+    jal _print_string
     # L20:
 L20:
+    # print "Two"
+    la $a0, _str_1
+    # (Llamando a print para tipo: string)
+    jal _print_string
     # L21:
 L21:
+    # print "Other"
+    la $a0, _str_2
+    # (Llamando a print para tipo: string)
+    jal _print_string
     # function constructor:
 constructor:
     # enter 20
@@ -522,18 +543,18 @@ constructor:
     lw $t1, 0($t0)
     sw $t1, -24($fp)
     # this."x" = t2
+    # (Asignando a campo 'x' en offset 0)
     lw $t0, -28($fp)
     lw $t1, -24($fp)
-    # (Asignando a campo 'x' en offset 0)
     sw $t1, 0($t0)
     # t2 = @FP[-8]
     addi $t0, $fp, -8
     lw $t1, 0($t0)
     sw $t1, -24($fp)
     # this."y" = t2
+    # (Asignando a campo 'y' en offset 4)
     lw $t0, -28($fp)
     lw $t1, -24($fp)
-    # (Asignando a campo 'y' en offset 4)
     sw $t1, 4($t0)
     # leave
     addu $sp, $sp, 20
@@ -550,8 +571,8 @@ getX:
     move $fp, $sp
     subu $sp, $sp, 12
     # t2 = this."x"
-    lw $t0, -16($fp)
     # (Accediendo a campo 'x' en offset 0)
+    lw $t0, -16($fp)
     lw $t1, 0($t0)
     sw $t1, -20($fp)
     # return t2
@@ -564,7 +585,8 @@ getX:
     addu $sp, $sp, 8
     # end_function getX
     # t2 = new Point
-    # ADVERTENCIA: _load_op no sabe cómo cargar 'Point'
+    # Alocando 8 bytes para Point
+    li $a0, 8
     jal _alloc
     sw $v0, -20($fp)
     # push 10
@@ -582,12 +604,12 @@ getX:
     la $at, global_103c
     sw $t0, 0($at)
     # t1 = t2."getX"
-    lw $t0, -20($fp)
-    # (Accediendo a campo 'getX' en offset 0)
-    lw $t1, 0($t0)
-    sw $t1, -24($fp)
+    # (Resolviendo dirección de método getX)
+    la $t0, getX
+    sw $t0, -24($fp)
     # call t1, 0
-    jal t1
+    lw $t0, -24($fp)
+    jalr $t0
     # pop t3
     lw $t0, 0($sp)
     addu $sp, $sp, 4
@@ -597,9 +619,9 @@ getX:
     lw $t1, 0($t0)
     sw $t1, -28($fp)
     # t3."x" = 30
+    # (Asignando a campo 'x' en offset 0)
     lw $t0, -28($fp)
     li $t1, 30
-    # (Asignando a campo 'x' en offset 0)
     sw $t1, 0($t0)
 
 # === HELPERS DEL RUNTIME ===
