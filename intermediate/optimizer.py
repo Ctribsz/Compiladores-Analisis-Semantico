@@ -14,8 +14,10 @@ def _const_val(x):
     return getattr(x, "value", x)
 
 def _is_temp_name(x) -> bool:
+    """Chequea si un operando es un temporal (ej: t1, tt1, t_loop)"""
     s = str(_const_val(x))
-    return isinstance(s, str) and s.startswith("t") and len(s) > 1 and s[1:].isdigit()
+    # La regla simple: si empieza con 't' y no es 'true' o 'this', es un temporal.
+    return isinstance(s, str) and s.startswith("t") and s not in ("true", "this")
 # -----------------------------------
 
 @dataclass
@@ -273,7 +275,7 @@ class TACOptimizer:
                             else:
                                 # Forwarding: usar el temporal directamente
                                 result.append(TACInstruction(
-                                    inst.op, 
+                                    TACOp.ASSIGN, 
                                     self._copy_operand_with_type(inst.result), 
                                     self._copy_operand_with_type(TACOperand(prev_temp, typ=inst.arg1.typ if hasattr(inst.arg1, 'typ') else None))
                                 ))

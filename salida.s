@@ -31,6 +31,9 @@ _false:   .asciiz "false"  # String para boolean false
 
 main:
 
+    # Inicializar frame pointer para main
+    move $fp, $sp
+    subu $sp, $sp, 200  # Reservar espacio para temporales
     # 0x1000 = 10
     li $t0, 10
     la $at, global_1000
@@ -39,137 +42,139 @@ main:
     li $t0, 20
     la $at, global_1004
     sw $t0, 0($at)
-    # t2 = @0x1000
+    # tt2 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = @0x1004
+    # tt1 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t3 = t2 add t1
-    lw $t0, -4($fp)
-    lw $t1, -8($fp)
+    # tt3 = ttt2 add ttt1
+    lw $t0, -12($fp)
+    lw $t1, -16($fp)
     add $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # t3 = t2
-    lw $t0, -4($fp)
-    sw $t0, -12($fp)
-    # t1 = t2 add t2
-    lw $t0, -4($fp)
-    lw $t1, -4($fp)
+    sw $t2, -20($fp)
+    # tt3 = @tt2
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt2'
+    lw $t1, 0($t0)
+    sw $t1, -20($fp)
+    # tt1 = ttt3 add ttt3
+    lw $t0, -24($fp)
+    lw $t1, -24($fp)
     add $t2, $t0, $t1
     sw $t2, -8($fp)
-    # t3 = t1
-    lw $t0, -8($fp)
-    sw $t0, -12($fp)
-    # t2 = t1 div 5
-    lw $t0, -8($fp)
+    # tt3 = @tt1
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt1'
+    lw $t1, 0($t0)
+    sw $t1, -20($fp)
+    # tt2 = ttt3 div 5
+    lw $t0, -24($fp)
     li $t1, 5
     div $t2, $t0, $t1
     sw $t2, -4($fp)
-    # t3 = t1 add t2
-    lw $t0, -8($fp)
-    lw $t1, -4($fp)
+    # tt3 = ttt1 add ttt2
+    lw $t0, -16($fp)
+    lw $t1, -12($fp)
     add $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # t2 = t3 sub 3
-    lw $t0, -12($fp)
+    sw $t2, -20($fp)
+    # tt2 = ttt3 sub 3
+    lw $t0, -24($fp)
     li $t1, 3
     sub $t2, $t0, $t1
     sw $t2, -4($fp)
-    # t2 = t3
+    # tt2 = @tt3
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt3'
+    lw $t1, 0($t0)
+    sw $t1, -4($fp)
+    # tt3 = @tt3
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt3'
+    lw $t1, 0($t0)
+    sw $t1, -20($fp)
+    # tt1 = ttt2 < ttt3
     lw $t0, -12($fp)
-    sw $t0, -4($fp)
-    # t1 = t3 < t3
-    lw $t0, -12($fp)
-    lw $t1, -12($fp)
+    lw $t1, -24($fp)
     slt $t2, $t0, $t1
     sw $t2, -8($fp)
-    # 0x1010 = t1
-    lw $t0, -8($fp)
+    # 0x1010 = ttt1
+    lw $t0, -16($fp)
     la $at, global_1010
     sw $t0, 0($at)
-    # t3 = t2
-    lw $t0, -4($fp)
-    sw $t0, -12($fp)
-    # t2 = t3 == 10
-    lw $t0, -12($fp)
+    # tt3 = @tt2
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt2'
+    lw $t1, 0($t0)
+    sw $t1, -20($fp)
+    # tt2 = ttt3 == 10
+    lw $t0, -24($fp)
     li $t1, 10
     seq $t2, $t0, $t1
     sw $t2, -4($fp)
-    # ifFalse t2 goto L0
+    # ifFalse tt2 goto L0
     lw $t0, -4($fp)
     beq $t0, $zero, L0
-    # t2 = @0x1004
+    # tt2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t3 = t2 != 0
-    lw $t0, -4($fp)
+    # tt3 = ttt2 != 0
+    lw $t0, -12($fp)
     li $t1, 0
     sne $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # t1 = t3
-    lw $t0, -12($fp)
+    sw $t2, -20($fp)
+    # tt1 = ttt3
+    lw $t0, -24($fp)
     sw $t0, -8($fp)
     # goto L1
     j L1
     # L0:
 L0:
-    # t1 = false
-    li $t0, 0
-    sw $t0, -8($fp)
     # L1:
 L1:
-    # 0x1014 = t1
-    lw $t0, -8($fp)
+    # 0x1014 = ttt1
+    lw $t0, -16($fp)
     la $at, global_1014
     sw $t0, 0($at)
-    # t3 = @0x1010
+    # tt3 = @0x1010
     la $t0, global_1010
     lw $t1, 0($t0)
-    sw $t1, -12($fp)
-    # t2 = !t3
-    lw $t0, -12($fp)
+    sw $t1, -20($fp)
+    # tt2 = !ttt3
+    lw $t0, -24($fp)
     seq $t0, $t0, $zero
     sw $t0, -4($fp)
-    # if t2 goto L2
+    # if tt2 goto L2
     lw $t0, -4($fp)
     bne $t0, $zero, L2
-    # t2 = @0x1014
+    # tt2 = @0x1014
     la $t0, global_1014
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = t2
-    lw $t0, -4($fp)
+    # tt1 = ttt2
+    lw $t0, -12($fp)
     sw $t0, -8($fp)
     # goto L3
     j L3
     # L2:
 L2:
-    # t1 = true
-    li $t0, 1
-    sw $t0, -8($fp)
     # L3:
 L3:
-    # t1 = @0x1000
+    # tt1 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t2 = @0x1004
+    # tt2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t3 = t1 < t2
-    lw $t0, -8($fp)
-    lw $t1, -4($fp)
+    # tt3 = ttt1 < ttt2
+    lw $t0, -16($fp)
+    lw $t1, -12($fp)
     slt $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # ifFalse t3 goto L4
-    lw $t0, -12($fp)
+    sw $t2, -20($fp)
+    # ifFalse tt3 goto L4
+    lw $t0, -20($fp)
     beq $t0, $zero, L4
-    # t2 = @0x1000
+    # tt2 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -4($fp)
@@ -177,7 +182,7 @@ L3:
     j L5
     # L4:
 L4:
-    # t2 = @0x1004
+    # tt2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -4($fp)
@@ -189,33 +194,37 @@ L5:
     sw $t0, 0($at)
     # L6:
 L6:
-    # t2 = @0x101c
+    # tt2 = @0x101c
     la $t0, global_101c
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # t1 = t2 < 5
-    lw $t0, -4($fp)
+    # tt1 = ttt2 < 5
+    lw $t0, -12($fp)
     li $t1, 5
     slt $t2, $t0, $t1
     sw $t2, -8($fp)
-    # ifFalse t1 goto L7
+    # ifFalse tt1 goto L7
     lw $t0, -8($fp)
     beq $t0, $zero, L7
-    # t2 = @0x101c
+    # tt2 = @0x101c
     la $t0, global_101c
     lw $t1, 0($t0)
     sw $t1, -4($fp)
-    # print t2
-    lw $a0, -4($fp)
-    # (Llamando a print para tipo: None)
+    # print ttt2
+    lw $a0, -12($fp)
+    # (Llamando a print para tipo: integer)
     jal _print_int
-    # t3 = t2 add 1
-    lw $t0, -4($fp)
+    # tt2 = @tt2
+    # ADVERTENCIA: _get_addr no sabe cómo obtener dirección de 'tt2'
+    lw $t1, 0($t0)
+    sw $t1, -4($fp)
+    # tt3 = ttt2 add 1
+    lw $t0, -12($fp)
     li $t1, 1
     add $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # 0x101c = t3
-    lw $t0, -12($fp)
+    sw $t2, -20($fp)
+    # 0x101c = ttt3
+    lw $t0, -24($fp)
     la $at, global_101c
     sw $t0, 0($at)
     # goto L6
@@ -228,32 +237,32 @@ L7:
     sw $t0, 0($at)
     # L8:
 L8:
-    # t1 = @0x1020
+    # tt1 = @0x1020
     la $t0, global_1020
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t3 = t1 < 3
-    lw $t0, -8($fp)
+    # tt3 = ttt1 < 3
+    lw $t0, -16($fp)
     li $t1, 3
     slt $t2, $t0, $t1
-    sw $t2, -12($fp)
-    # ifFalse t3 goto L10
-    lw $t0, -12($fp)
+    sw $t2, -20($fp)
+    # ifFalse tt3 goto L10
+    lw $t0, -20($fp)
     beq $t0, $zero, L10
-    # t1 = @0x1020
+    # tt1 = @0x1020
     la $t0, global_1020
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # print t1
-    lw $a0, -8($fp)
-    # (Llamando a print para tipo: None)
+    # print ttt1
+    lw $a0, -16($fp)
+    # (Llamando a print para tipo: integer)
     jal _print_int
-    # t1 = @0x1020
+    # tt1 = @0x1020
     la $t0, global_1020
     lw $t1, 0($t0)
     sw $t1, -8($fp)
-    # t2 = t1 add 1
-    lw $t0, -8($fp)
+    # tt2 = ttt1 add 1
+    lw $t0, -16($fp)
     li $t1, 1
     add $t2, $t0, $t1
     sw $t2, -4($fp)
@@ -269,21 +278,21 @@ add:
     sw $fp, 0($sp)
     move $fp, $sp
     subu $sp, $sp, 20
-    # t3 = @FP[-4]
+    # tt3 = @FP[-4]
     addi $t0, $fp, -4
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # t2 = @FP[-8]
+    # tt2 = @FP[-8]
     addi $t0, $fp, -8
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # t1 = t3 add t2
-    lw $t0, -24($fp)
-    lw $t1, -28($fp)
+    # tt1 = ttt3 add ttt2
+    lw $t0, -32($fp)
+    lw $t1, -36($fp)
     add $t2, $t0, $t1
-    sw $t2, -32($fp)
-    # return t1
-    lw $v0, -32($fp)
+    sw $t2, -40($fp)
+    # return tt1
+    lw $v0, -40($fp)
     jr $ra
     # leave
     addu $sp, $sp, 20
@@ -303,10 +312,10 @@ add:
     jal add
     # SP = SP + 8
     addu $sp, $sp, 8
-    # pop t1
+    # pop tt1
     lw $t0, 0($sp)
     addu $sp, $sp, 4
-    sw $t0, -32($fp)
+    sw $t0, -40($fp)
     # function max:
 max:
     # enter 20
@@ -315,38 +324,38 @@ max:
     sw $fp, 0($sp)
     move $fp, $sp
     subu $sp, $sp, 20
-    # t1 = @FP[-4]
+    # tt1 = @FP[-4]
     addi $t0, $fp, -4
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # t2 = @FP[-8]
+    # tt2 = @FP[-8]
     addi $t0, $fp, -8
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # t3 = t1 > t2
-    lw $t0, -24($fp)
-    lw $t1, -28($fp)
-    sgt $t2, $t0, $t1
-    sw $t2, -32($fp)
-    # ifFalse t3 goto L11
+    # tt3 = ttt1 > ttt2
     lw $t0, -32($fp)
+    lw $t1, -36($fp)
+    sgt $t2, $t0, $t1
+    sw $t2, -40($fp)
+    # ifFalse tt3 goto L11
+    lw $t0, -40($fp)
     beq $t0, $zero, L11
-    # t2 = @FP[-4]
+    # tt2 = @FP[-4]
     addi $t0, $fp, -4
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # return t2
+    # return tt2
     lw $v0, -28($fp)
     jr $ra
     # goto L12
     j L12
     # L11:
 L11:
-    # t2 = @FP[-8]
+    # tt2 = @FP[-8]
     addi $t0, $fp, -8
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # return t2
+    # return tt2
     lw $v0, -28($fp)
     jr $ra
     # L12:
@@ -357,102 +366,102 @@ L12:
     lw $fp, 0($sp)
     addu $sp, $sp, 8
     # end_function max
-    # t2 = new 5
+    # tt2 = new 5
     # Alocando 20 bytes para array[5]
     li $a0, 20
     jal _alloc
     sw $v0, -28($fp)
-    # t2[0] = 1
+    # tt2[0] = 1
     lw $t0, -28($fp)
     li $t1, 0
     li $t2, 1
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # t2[1] = 2
+    # tt2[1] = 2
     lw $t0, -28($fp)
     li $t1, 1
     li $t2, 2
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # t2[2] = 3
+    # tt2[2] = 3
     lw $t0, -28($fp)
     li $t1, 2
     li $t2, 3
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # t2[3] = 4
+    # tt2[3] = 4
     lw $t0, -28($fp)
     li $t1, 3
     li $t2, 4
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # t2[4] = 5
+    # tt2[4] = 5
     lw $t0, -28($fp)
     li $t1, 4
     li $t2, 5
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # 0x1028 = t2
-    lw $t0, -28($fp)
+    # 0x1028 = ttt2
+    lw $t0, -36($fp)
     la $at, global_1028
     sw $t0, 0($at)
-    # t1 = t2[0]
-    lw $t0, -28($fp)
+    # tt1 = ttt2[0]
+    lw $t0, -36($fp)
     li $t1, 0
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     lw $t2, 0($t0)
     sw $t2, -24($fp)
-    # t1 = @0x1028
+    # tt1 = @0x1028
     la $t0, global_1028
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # t1[1] = 10
+    # tt1[1] = 10
     lw $t0, -24($fp)
     li $t1, 1
     li $t2, 10
     sll $t1, $t1, 2
     add $t0, $t0, $t1
     sw $t2, 0($t0)
-    # t1 = @0x1000
+    # tt1 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # t4 = @0x1004
+    # tt4 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
-    sw $t1, -36($fp)
-    # t3 = t1 < t4
-    lw $t0, -24($fp)
-    lw $t1, -36($fp)
-    slt $t2, $t0, $t1
-    sw $t2, -32($fp)
-    # ifFalse t3 goto L13
+    sw $t1, -44($fp)
+    # tt3 = ttt1 < ttt4
     lw $t0, -32($fp)
+    lw $t1, -48($fp)
+    slt $t2, $t0, $t1
+    sw $t2, -40($fp)
+    # ifFalse tt3 goto L13
+    lw $t0, -40($fp)
     beq $t0, $zero, L13
-    # t1 = @0x1000
+    # tt1 = @0x1000
     la $t0, global_1000
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # t4 = t1
-    lw $t0, -24($fp)
-    sw $t0, -36($fp)
+    # tt4 = ttt1
+    lw $t0, -32($fp)
+    sw $t0, -44($fp)
     # goto L14
     j L14
     # L13:
 L13:
-    # t2 = @0x1004
+    # tt2 = @0x1004
     la $t0, global_1004
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # t4 = t2
-    lw $t0, -28($fp)
-    sw $t0, -36($fp)
+    # tt4 = ttt2
+    lw $t0, -36($fp)
+    sw $t0, -44($fp)
     # L14:
 L14:
     # 0x1034 = 0
@@ -461,53 +470,53 @@ L14:
     sw $t0, 0($at)
     # L15:
 L15:
-    # t4 = @0x1034
+    # tt4 = @0x1034
     la $t0, global_1034
     lw $t1, 0($t0)
-    sw $t1, -36($fp)
-    # t2 = t4 add 1
-    lw $t0, -36($fp)
+    sw $t1, -44($fp)
+    # tt2 = ttt4 add 1
+    lw $t0, -48($fp)
     li $t1, 1
     add $t2, $t0, $t1
     sw $t2, -28($fp)
-    # 0x1034 = t2
-    lw $t0, -28($fp)
+    # 0x1034 = ttt2
+    lw $t0, -36($fp)
     la $at, global_1034
     sw $t0, 0($at)
-    # t2 = @0x1034
+    # tt2 = @0x1034
     la $t0, global_1034
     lw $t1, 0($t0)
     sw $t1, -28($fp)
-    # t4 = t2 < 3
-    lw $t0, -28($fp)
+    # tt4 = ttt2 < 3
+    lw $t0, -36($fp)
     li $t1, 3
     slt $t2, $t0, $t1
-    sw $t2, -36($fp)
-    # if t4 goto L15
-    lw $t0, -36($fp)
+    sw $t2, -44($fp)
+    # if tt4 goto L15
+    lw $t0, -44($fp)
     bne $t0, $zero, L15
     # 0x1038 = 2
     li $t0, 2
     la $at, global_1038
     sw $t0, 0($at)
-    # t4 = @0x1038
+    # tt4 = @0x1038
     la $t0, global_1038
     lw $t1, 0($t0)
-    sw $t1, -36($fp)
-    # t2 = t4 == 1
-    lw $t0, -36($fp)
+    sw $t1, -44($fp)
+    # tt2 = ttt4 == 1
+    lw $t0, -48($fp)
     li $t1, 1
     seq $t2, $t0, $t1
     sw $t2, -28($fp)
-    # if t2 goto L19
+    # if tt2 goto L19
     lw $t0, -28($fp)
     bne $t0, $zero, L19
-    # t2 = t4 == 2
-    lw $t0, -36($fp)
+    # tt2 = ttt4 == 2
+    lw $t0, -48($fp)
     li $t1, 2
     seq $t2, $t0, $t1
     sw $t2, -28($fp)
-    # if t2 goto L20
+    # if tt2 goto L20
     lw $t0, -28($fp)
     bne $t0, $zero, L20
     # goto L21
@@ -538,20 +547,20 @@ constructor:
     sw $fp, 0($sp)
     move $fp, $sp
     subu $sp, $sp, 20
-    # t2 = @FP[-4]
+    # tt2 = @FP[-4]
     addi $t0, $fp, -4
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # this."x" = t2
+    # this."x" = tt2
     # (Asignando a campo 'x' en offset 0)
     lw $t0, -28($fp)
     lw $t1, -24($fp)
     sw $t1, 0($t0)
-    # t2 = @FP[-8]
+    # tt2 = @FP[-8]
     addi $t0, $fp, -8
     lw $t1, 0($t0)
     sw $t1, -24($fp)
-    # this."y" = t2
+    # this."y" = tt2
     # (Asignando a campo 'y' en offset 4)
     lw $t0, -28($fp)
     lw $t1, -24($fp)
@@ -570,12 +579,12 @@ getX:
     sw $fp, 0($sp)
     move $fp, $sp
     subu $sp, $sp, 12
-    # t2 = this."x"
+    # tt2 = this."x"
     # (Accediendo a campo 'x' en offset 0)
     lw $t0, -16($fp)
     lw $t1, 0($t0)
     sw $t1, -20($fp)
-    # return t2
+    # return tt2
     lw $v0, -20($fp)
     jr $ra
     # leave
@@ -584,7 +593,7 @@ getX:
     lw $fp, 0($sp)
     addu $sp, $sp, 8
     # end_function getX
-    # t2 = new Point
+    # tt2 = new Point
     # Alocando 8 bytes para Point
     li $a0, 8
     jal _alloc
@@ -599,30 +608,33 @@ getX:
     sw $t0, 0($sp)
     # call Point.constructor, 2
     jal Point_constructor
-    # 0x103c = t2
-    lw $t0, -20($fp)
+    # 0x103c = ttt2
+    lw $t0, -24($fp)
     la $at, global_103c
     sw $t0, 0($at)
-    # t1 = t2."getX"
+    # tt1 = ttt2."getX"
     # (Resolviendo dirección de método getX)
     la $t0, getX
-    sw $t0, -24($fp)
-    # call t1, 0
-    lw $t0, -24($fp)
+    sw $t0, -28($fp)
+    # call tt1, 0
+    lw $t0, -28($fp)
     jalr $t0
-    # pop t3
+    # pop tt3
     lw $t0, 0($sp)
     addu $sp, $sp, 4
-    sw $t0, -28($fp)
-    # t3 = @0x103c
+    sw $t0, -32($fp)
+    # tt3 = @0x103c
     la $t0, global_103c
     lw $t1, 0($t0)
-    sw $t1, -28($fp)
-    # t3."x" = 30
+    sw $t1, -32($fp)
+    # tt3."x" = 30
     # (Asignando a campo 'x' en offset 0)
-    lw $t0, -28($fp)
+    lw $t0, -32($fp)
     li $t1, 30
     sw $t1, 0($t0)
+    
+# Terminar programa
+    jal _exit
 
 # === HELPERS DEL RUNTIME ===
 
