@@ -109,6 +109,21 @@ class TACOptimizer:
         
         print(f"✅ Optimización completa: {self.program.temp_counter} → {max_temp} temporales")
         return out
+    
+    def _copy_operand_with_type(self, operand):  
+        """Crea una copia de un operando preservando su tipo."""
+        if operand is None:
+            return None
+        if isinstance(operand, TACOperand):
+            return TACOperand(
+                value=operand.value,
+                is_temp=operand.is_temp,
+                is_constant=operand.is_constant,
+                is_label=operand.is_label,
+                typ=operand.typ
+            )
+        else:
+            return TACOperand(operand)
 
     def _surgical_optimize(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """Aplica optimizaciones quirúrgicas específicas"""
@@ -208,7 +223,9 @@ class TACOptimizer:
             if a2 and str(a2) in replacements:
                 a2 = replacements[str(a2)]
             
-            result.append(TACInstruction(inst.op, inst.result, a1, a2))
+            result.append(TACInstruction(inst.op, self._copy_operand_with_type(inst.result), 
+                                         self._copy_operand_with_type(a1), 
+                                         self._copy_operand_with_type(a2)))
         
         return result
     
@@ -256,9 +273,9 @@ class TACOptimizer:
                             else:
                                 # Forwarding: usar el temporal directamente
                                 result.append(TACInstruction(
-                                    TACOp.ASSIGN,
-                                    inst.result,
-                                    TACOperand(prev_temp)
+                                    inst.op, 
+                                    self._copy_operand_with_type(inst.result), 
+                                    self._copy_operand_with_type(TACOperand(prev_temp, typ=inst.arg1.typ if hasattr(inst.arg1, 'typ') else None))
                                 ))
                                 continue
                 
@@ -301,7 +318,12 @@ class TACOptimizer:
                 a1 = const_temps[str(a1)]
             if a2 and str(a2) in const_temps:
                 a2 = const_temps[str(a2)]
-            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            new_inst = TACInstruction(
+                inst.op, 
+                self._copy_operand_with_type(inst.result), 
+                self._copy_operand_with_type(a1), 
+                self._copy_operand_with_type(a2)
+            )
             
             # Si redefinimos el temp, removerlo del mapa
             if new_inst.result and str(new_inst.result) in const_temps:
@@ -374,9 +396,9 @@ class TACOptimizer:
                 if addr in last_load:
                     prev_temp, prev_idx = last_load[addr]
                     result.append(TACInstruction(
-                        TACOp.ASSIGN,
-                        inst.result,
-                        TACOperand(prev_temp)
+                        inst.op, 
+                        self._copy_operand_with_type(inst.result),
+                        self._copy_operand_with_type(TACOperand(prev_temp, typ=inst.arg1.typ if hasattr(inst.arg1, 'typ') else None))
                     ))
                     last_load[addr] = (str(inst.result), i)
                     continue
@@ -395,7 +417,12 @@ class TACOptimizer:
             if inst.op == TACOp.MUL:
                 # x * 2 → x + x
                 if _is_const(inst.arg2) and _const_val(inst.arg2) == 2:
-                    result.append(TACInstruction(TACOp.ADD, inst.result, inst.arg1, inst.arg1))
+                    result.append(TACInstruction(
+                        TACOp.ADD, 
+                        self._copy_operand_with_type(inst.result), 
+                        self._copy_operand_with_type(inst.arg1), 
+                        self._copy_operand_with_type(inst.arg1)
+                    ))
                     continue
                 # 2 * x → x + x
                 if _is_const(inst.arg1) and _const_val(inst.arg1) == 2:
@@ -430,14 +457,37 @@ class TACOptimizer:
                 result.append(inst)
                 continue
             
-            # Sustituir usos
+            # Sustituir usos - CON VERIFICACIÓN DE NONE
             a1 = inst.arg1
             a2 = inst.arg2
-            if a1 and str(a1) in copy_map:
-                a1 = TACOperand(copy_map[str(a1)])
-            if a2 and str(a2) in copy_map:
-                a2 = TACOperand(copy_map[str(a2)])
-            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            
+            # Solo sustituir si a1 no es None Y está en el mapa
+            if a1 is not None and str(a1) in copy_map:
+                # Crear nuevo operando preservando el tipo de a1
+                new_name = copy_map[str(a1)]
+                a1 = TACOperand(
+                    value=new_name,
+                    is_temp=_is_temp_name(new_name),
+                    typ=a1.typ if hasattr(a1, 'typ') else None
+                )
+            
+            # Solo sustituir si a2 no es None Y está en el mapa
+            if a2 is not None and str(a2) in copy_map:
+                # Crear nuevo operando preservando el tipo de a2
+                new_name = copy_map[str(a2)]
+                a2 = TACOperand(
+                    value=new_name,
+                    is_temp=_is_temp_name(new_name),
+                    typ=a2.typ if hasattr(a2, 'typ') else None
+                )
+            
+            # Crear nueva instrucción preservando tipos
+            new_inst = TACInstruction(
+                inst.op, 
+                self._copy_operand_with_type(inst.result), 
+                self._copy_operand_with_type(a1), 
+                self._copy_operand_with_type(a2)
+            )
             
             # Si redefinimos el destino, invalidar
             if new_inst.result and str(new_inst.result) in copy_map:
@@ -634,8 +684,14 @@ class TACOptimizer:
                 if op and _is_temp_name(op):
                     name = str(op)
                     if name in coloring:
-                        return TACOperand(f"t{coloring[name]}")
-                return op
+                        # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+                        return TACOperand(
+                            value=f"t{coloring[name]}",
+                            is_temp=True,
+                            typ=op.typ if hasattr(op, 'typ') else None
+                        )
+                # Devolver una copia segura del operando original si no se renombra
+                return self._copy_operand_with_type(op)
             
             result.append(TACInstruction(
                 inst.op,
@@ -683,7 +739,9 @@ class TACOptimizer:
                             v = val1 % val2
                         else:
                             result.append(inst); continue
-                        result.append(TACInstruction(TACOp.ASSIGN, inst.result, TACOperand(v, is_constant=True)))
+                        # CORRECCIÓN: Asignar el tipo del resultado (ej: t1) al nuevo operando constante
+                        new_const = TACOperand(v, is_constant=True, typ=inst.result.typ if hasattr(inst.result, 'typ') else None)
+                        result.append(TACInstruction(TACOp.ASSIGN, inst.result, new_const))
                         continue
                 result.append(inst); continue
             
@@ -877,14 +935,26 @@ class TACOptimizer:
 
             # Proteger DEREF: NUNCA sustituir el arg1 de un DEREF
             if inst.op != TACOp.DEREF:
-                if a1 is not None and not _is_const(a1): 
-                    a1 = TACOperand(root(str(a1)))
+                if a1 is not None and not _is_const(a1):
+                    new_name = root(str(a1))
+                    # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+                    a1 = TACOperand(
+                        value=new_name,
+                        is_temp=_is_temp_name(new_name),
+                        typ=a1.typ if hasattr(a1, 'typ') else None
+                    )
 
             # arg2 siempre es seguro de sustituir
-            if a2 is not None and not _is_const(a2): 
-                a2 = TACOperand(root(str(a2)))
+            if a2 is not None and not _is_const(a2):
+                new_name = root(str(a2))
+                # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+                a2 = TACOperand(
+                    value=new_name,
+                    is_temp=_is_temp_name(new_name),
+                    typ=a2.typ if hasattr(a2, 'typ') else None
+                )
 
-            new_inst = TACInstruction(inst.op, inst.result, a1, a2)
+            new_inst = TACInstruction(inst.op, self._copy_operand_with_type(inst.result), a1, a2)
 
             if new_inst.result is not None:
                 break_aliases_pointing_to(str(new_inst.result))

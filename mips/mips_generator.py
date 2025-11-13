@@ -60,26 +60,37 @@ class MIPSGenerator:
 
     def generate(self) -> str:
         """Punto de entrada principal. Orquesta la generación."""
-        # 1. Recolectar info de clases (NUEVO)
+        # 1. Recolectar info de clases
         self._collect_class_layouts()
-
-        # 1. Escanear el TAC para encontrar data (globales y strings)
+        
+        # 2. Escanear el TAC para encontrar data (globales y strings)
         self._scan_for_data()
         
-        # 2. Generar sección .data
+        # 3. Generar sección .data
         self.mips_code.append("# === SECCIÓN DE DATOS ===")
         self._build_data_section()
         
-        # 3. Generar sección .text
+        # 4. Generar sección .text
         self.mips_code.append("\n# === SECCIÓN DE CÓDIGO ===")
         self._emit(get_text_preamble(), indent=0)
         
-        # 4. Traducir cada instrucción TAC
+        # ========== NUEVO: INICIALIZAR $fp y $sp para main ==========
+        self._emit("# Inicializar frame pointer para main", indent=1)
+        self._emit("move $fp, $sp", indent=1)
+        self._emit("subu $sp, $sp, 200  # Reservar espacio para temporales", indent=1)
+        # ===========================================================
+        
+        # 5. Traducir cada instrucción TAC
         for inst in self.program.instructions:
-            self._emit(f"# {inst}", indent=1) # El TAC como comentario
+            self._emit(f"# {inst}", indent=1)
             self._translate_instruction(inst)
-            
-        # 5. Añadir helpers (syscalls) al final
+        
+        # ========== NUEVO: TERMINAR PROGRAMA LIMPIAMENTE ==========
+        self._emit("\n# Terminar programa", indent=1)
+        self._emit("jal _exit", indent=1)
+        # =========================================================
+        
+        # 6. Añadir helpers (syscalls) al final
         self.mips_code.append("\n# === HELPERS DEL RUNTIME ===")
         self.mips_code.append(get_syscall_helpers())
         
@@ -271,8 +282,16 @@ class MIPSGenerator:
 
         # --- Funciones y Stack ---
         elif op == TACOp.FUNC_START:
-            label = self._sanitize_label(str(inst.arg1)) # <-- SANITIZAR
-            self._emit(f"{label}:", indent=0) # Etiqueta de función
+            label = str(inst.arg1.value)  # Obtener nombre original
+            
+            # Si es un constructor o método de clase, mantener el formato Class_method
+            if "." in label:
+                parts = label.split(".")
+                label = "_".join(parts)  # Point.constructor → Point_constructor
+            else:
+                label = self._sanitize_label(label)
+            
+            self._emit(f"{label}:", indent=0)
             # Reseteamos el mapa de temporales para esta nueva función
             self.temp_map = {}
             self.current_frame_size = 0
@@ -439,6 +458,11 @@ class MIPSGenerator:
 
     def _sanitize_label(self, label: str) -> str:
         """Reemplaza caracteres no válidos de MIPS por '_'."""
+        # Manejar casos especiales para clases
+        if "." in label:
+            # Ejemplo: "Point.constructor" → "Point_constructor"
+            parts = label.split(".")
+            return "_".join(parts)
         return label.replace(".", "_")
 
     def _store_op(self, reg: str, op: TACOperand):

@@ -336,28 +336,33 @@ class TACGenerator(CompiscriptVisitor):
         return None
     
     def visitPrintStatement(self, ctx: CompiscriptParser.PrintStatementContext):
-            """Genera código para print (con tipo)"""
-            # value_op puede ser un string 'tK' o un TACOperand
-            value_op = self.visit(ctx.expression())
-            
-            # --- LÍNEA DE DEFENSA ---
-            # Usamos _make_operand para asegurar que value_to_print sea un objeto
-            value_to_print = self._make_operand(value_op)
+        value_op = self.visit(ctx.expression())
+        value_to_print = self._make_operand(value_op)
+        
+        # 🔍 DEBUG TEMPORAL
+        print(f"\n=== DEBUG visitPrintStatement ===")
+        print(f"value_op = {value_op}")
+        print(f"value_op type = {type(value_op)}")
+        if isinstance(value_op, TACOperand):
+            print(f"value_op.typ = {value_op.typ}")
+        print(f"value_to_print = {value_to_print}")
+        print(f"value_to_print.typ = {value_to_print.typ}")
+        print(f"=== FIN DEBUG ===\n")
 
-            # --- LÓGICA DE TIPO ---
-            # Obtener el tipo que el TypeChecker (Fase 1) calculó
+        # --- LÓGICA DE TIPO (CORREGIDA) ---
+        # Primero, verificar si el operando YA tiene tipo asignado (desde visitIdentifierExpr)
+        if not value_to_print.typ:
+            # Solo si NO tiene tipo, buscar en types_by_ctx
             expr_type = self.types_by_ctx.get(ctx.expression(), None)
-            
-            # Asignar el tipo (como string) al operando TAC
             if expr_type:
                 value_to_print.typ = str(expr_type)
-            # --- FIN LÓGICA DE TIPO ---
-            
-            self.program.emit(TACOp.PRINT, arg1=value_to_print)
-            
-            # Liberamos el temporal usando el 'value_op' original (que podría ser str)
-            self._free_if_temp(value_op)
-            return None
+        # --- FIN LÓGICA DE TIPO ---
+        
+        self.program.emit(TACOp.PRINT, arg1=value_to_print)
+        
+        # Liberamos el temporal usando el 'value_op' original (que podría ser str)
+        self._free_if_temp(value_op)
+        return None
     
     # ========== SWITCH STATEMENT ==========
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
@@ -823,31 +828,32 @@ class TACGenerator(CompiscriptVisitor):
         if not sym:
             return self._make_variable(name)
         
+        # ✅ Obtener el tipo del símbolo
+        sym_type = str(sym.typ) if hasattr(sym, 'typ') else None
+        
         # Si estamos en función y tiene offset: usar FP[offset]
         if self.in_function and hasattr(sym, 'offset') and sym.offset is not None:
             offset = sym.offset
-            fp_ref = TACOperand(f"FP[{offset}]")
+            fp_ref = TACOperand(f"FP[{offset}]", typ=sym_type)
             
-            # Parámetros (offset negativo) requieren cargar desde stack (DEREF),
-            # variables locales (offset >= 0) se referencian directamente sin DEREF.
             if offset < 0:
                 temp = self.program.new_temp()
-                self.program.emit(TACOp.DEREF, result=temp, arg1=fp_ref)
-                return temp
+                temp_op = TACOperand(temp, typ=sym_type)  # ✅ USA sym_type, NO types_by_ctx
+                self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
+                return temp_op
             else:
-                # Local: devolver referencia directa al frame
                 return fp_ref
         
         # Variable global: usar dirección de memoria si existe
         if name in self.global_addrs:
             addr_op = TACOperand(self.global_addrs[name])
             temp = self.program.new_temp()
-            # CORRECTO: result, arg1
-            self.program.emit(TACOp.DEREF, result=temp, arg1=addr_op)
-            return temp
+            temp_op = TACOperand(temp, typ=sym_type)  # ✅ USA sym_type, NO types_by_ctx
+            self.program.emit(TACOp.DEREF, result=temp_op, arg1=addr_op)
+            return temp_op
         
         # Fallback: referencia directa
-        return self._make_variable(name)
+        return self._make_variable(name, typ=sym_type)
     
     def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
         """Genera TAC para if-else con etiquetas"""
