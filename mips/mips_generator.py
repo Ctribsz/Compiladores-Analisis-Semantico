@@ -104,16 +104,18 @@ class MIPSGenerator:
         para construir la sección .data.
         """
         for inst in self.program.instructions:
-            # Buscar strings en operandos
+            # Buscar strings en operandos (arg1 y arg2)
             for op in [inst.arg1, inst.arg2]:
-                if op and op.is_constant and isinstance(op.value, str):
+                # Verificación robusta: debe ser TACOperand o tener atributo is_constant
+                if op and hasattr(op, 'is_constant') and op.is_constant and hasattr(op, 'value') and isinstance(op.value, str):
                     if op.value not in self.strings:
                         label = f"_str_{len(self.strings)}"
                         self.strings[op.value] = label
             
-            # Buscar globales (0x...)
+            # Buscar globales (0x...) en result, arg1, arg2
             for op in [inst.result, inst.arg1, inst.arg2]:
-                if op and isinstance(op.value, str) and op.value.startswith("0x"):
+                # Verificación robusta para evitar crashes con strings puros
+                if op and hasattr(op, 'value') and isinstance(op.value, str) and op.value.startswith("0x"):
                     self.globals.add(op.value)
 
     # --- FASE 2: CONSTRUCCIÓN DE .DATA ---
@@ -143,7 +145,25 @@ class MIPSGenerator:
         
         # --- Aritméticas ---
         if op == TACOp.ADD:
-            self._translate_binary_op(inst, "add")
+            # HACK: Verificar si es concatenación de strings
+            is_str_op = False
+            # Verificar tipo en arg1
+            if inst.arg1 and hasattr(inst.arg1, 'typ') and str(inst.arg1.typ) == 'string':
+                is_str_op = True
+            # O verificar tipo en arg2
+            elif inst.arg2 and hasattr(inst.arg2, 'typ') and str(inst.arg2.typ) == 'string':
+                is_str_op = True
+            
+            if is_str_op:
+                self._emit("# Concatenación de strings detectada")
+                self._load_op("$a0", inst.arg1)  # Cargar str1 en argumento 1
+                self._load_op("$a1", inst.arg2)  # Cargar str2 en argumento 2
+                self._emit("jal _string_concat") # Llamar a la función del runtime
+                self._store_op("$v0", inst.result) # Guardar resultado
+            else:
+                # Suma normal de enteros
+                self._translate_binary_op(inst, "add")
+
         elif op == TACOp.SUB:
             self._translate_binary_op(inst, "sub")
         elif op == TACOp.MUL:
@@ -337,7 +357,32 @@ class MIPSGenerator:
         elif op == TACOp.CALL:
             op_name = str(inst.arg1.value)
             
-            if op_name.startswith("t"):
+            # --- HACK: Interceptar toString ---
+            # Si el nombre termina en "toString" (para cubrir prefijos de clase si los hubiera)
+            if "toString" in op_name:
+                self._emit("# Interceptando llamada a toString -> _int_to_string")
+                self._load_op("$a0", inst.arg2)  # Cargar el argumento (el entero)
+                # NOTA: En tu TAC, CALL arg1 es la función, arg2 es el numero de args o el argumento.
+                # Revisando tu TACGenerator: CALL arg1=func, arg2=num_args.
+                # LOS ARGUMENTOS YA ESTÁN EN EL STACK (PUSH).
+                
+                # Corrección: Los argumentos se pasaron con PUSH.
+                # _int_to_string espera el argumento en $a0.
+                # Como acabamos de hacer PUSH del entero, está en 0($sp).
+                # OJO: El TAC Generator hace:
+                # PUSH arg
+                # CALL func, num_args
+                # ADD_SP ...
+                
+                # Entonces, justo antes del CALL, el argumento está en el tope del stack.
+                self._emit("lw $a0, 0($sp)") # Cargar el entero desde el stack
+                self._emit("jal _int_to_string")
+                
+                # El resultado queda en $v0, el TAC espera que CALL guarde en result si existe
+                if inst.result:
+                    self._store_op("$v0", inst.result)
+            
+            elif op_name.startswith("t"):
                 # Es una llamada indirecta (ej: call t1, donde t1 tiene addr(getX))
                 self._load_op("$t0", inst.arg1) # Cargar la dirección (de t1) en $t0
                 self._emit("jalr $t0")          # Jump And Link Register

@@ -398,7 +398,7 @@ class TACOptimizer:
                 if addr in last_load:
                     prev_temp, prev_idx = last_load[addr]
                     result.append(TACInstruction(
-                        inst.op, 
+                        TACOp.ASSIGN, 
                         self._copy_operand_with_type(inst.result),
                         self._copy_operand_with_type(TACOperand(prev_temp, typ=inst.arg1.typ if hasattr(inst.arg1, 'typ') else None))
                     ))
