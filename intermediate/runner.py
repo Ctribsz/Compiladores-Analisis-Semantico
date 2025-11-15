@@ -18,9 +18,10 @@ class IntermediateResult:
     tac_program: Optional[TACProgram]
     errors: list
     has_errors: bool
-
+    scopes_by_ctx: Optional[dict] 
     # --- Campos con default DESPUÉS ---
     global_scope: Optional[Scope] = None
+
     
     def get_tac_code(self) -> str:
         """Obtiene el código TAC como string"""
@@ -56,9 +57,10 @@ def generate_intermediate_code(tree) -> IntermediateResult:
     if errors.has_errors():
         return IntermediateResult(
             tac_program=None,
-            global_scope=symbol_collector.global_scope, 
             errors=errors.errors,
-            has_errors=True
+            has_errors=True,
+            scopes_by_ctx=symbol_collector.scopes_by_ctx,
+            global_scope=symbol_collector.global_scope
         )
     
     # Fase 3: Generación de código intermedio
@@ -72,16 +74,18 @@ def generate_intermediate_code(tree) -> IntermediateResult:
         
         return IntermediateResult(
             tac_program=tac_program,
-            global_scope=symbol_collector.global_scope, 
             errors=[],
-            has_errors=False
+            has_errors=False,
+            scopes_by_ctx=symbol_collector.scopes_by_ctx,
+            global_scope=symbol_collector.global_scope
         )
     except Exception as e:
         # Error en la generación de TAC
         errors.report(0, 0, "TAC_ERROR", f"Error generando código intermedio: {str(e)}")
         return IntermediateResult(
             tac_program=None,
-            global_scope=symbol_collector.global_scope, 
             errors=errors.errors,
-            has_errors=True
+            has_errors=True,
+            scopes_by_ctx=symbol_collector.scopes_by_ctx, 
+            global_scope=symbol_collector.global_scope
         )

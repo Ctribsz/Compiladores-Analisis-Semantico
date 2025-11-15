@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from intermediate.tac import TACProgram, TACInstruction, TACOp, TACOperand
 from mips.runtime import get_data_preamble, get_text_preamble, get_syscall_helpers
 from semantic.scope import Scope
-from semantic.symbols import ClassSymbol 
+from semantic.symbols import ClassSymbol, FunctionSymbol 
 
 class MIPSGenerator:
     """
@@ -27,9 +27,10 @@ class MIPSGenerator:
     - Temporales (tK): Se alocan dinámicamente en el stack por esta clase.
     """
     
-    def __init__(self, program: TACProgram, global_scope: Scope):
+    def __init__(self, program: TACProgram, global_scope: Scope, scopes_by_ctx: dict):
         self.program = program
-        self.global_scope = global_scope 
+        self.global_scope = global_scope
+        self.scopes_by_ctx = scopes_by_ctx 
         self.mips_code: List[str] = []
         
         # --- Estado de Generación ---
@@ -231,21 +232,27 @@ class MIPSGenerator:
             obj_op = inst.arg1
             member_name = str(inst.arg2.value)
 
-            # --- HACK: Asumir tipo 'Point' ---
-            class_layout = self.class_layouts.get("Point")
+            # --- CORRECCIÓN: Obtener tipo de clase dinámicamente ---
+            class_name = None
+            if obj_op and hasattr(obj_op, 'typ') and obj_op.typ:
+                class_name = str(obj_op.typ)
+
+            class_layout = self.class_layouts.get(class_name)
+            
             if not class_layout:
-                self._emit(f"# ERROR: No se encontró layout de clase 'Point' para {member_name}")
-                pass
+                self._emit(f"# ERROR: No se encontró layout de clase '{class_name}' para {member_name}")
+                return # <-- ¡IMPORTANTE: Usar continue para saltar!
             
             if member_name in class_layout.fields:
                 # --- Es un ACCESO A CAMPO (p.x) ---
                 field_name = member_name
-                offset = 0 # Default offset
+                offset = 0
                 try:
                     field_list = list(class_layout.fields.keys())
                     offset = field_list.index(field_name) * 4
                 except:
-                    offset = 4 if field_name == "y" else 0 # Fallback
+                    self._emit(f"# ERROR: Fallback de offset para {field_name}")
+                    offset = 0
                 
                 self._emit(f"# (Accediendo a campo '{field_name}' en offset {offset})")
                 self._load_op("$t0", obj_op) # t0 = base address
@@ -254,34 +261,45 @@ class MIPSGenerator:
             
             elif member_name in class_layout.methods:
                 # --- Es un ACCESO A MÉTODO (p.getX) ---
-                # El resultado debe ser la *dirección* de la función
-                # Asumimos que el método NO es de clase (ej: Point_getX)
-                method_label = self._sanitize_label(f"{member_name}") 
+                
+                # CORRECCIÓN: Encontrar la clase que define el método
+                implementation_class = self._find_method_implementation_class(class_name, member_name)
+                
+                method_label = self._sanitize_label(f"{implementation_class}.{member_name}") 
                 
                 self._emit(f"# (Resolviendo dirección de método {method_label})")
                 self._emit(f"la $t0, {method_label}")
                 self._store_op("$t0", inst.result) # result = addr(getX)
             else:
-                self._emit(f"# ERROR: Miembro '{member_name}' no encontrado en 'Point'")
+                self._emit(f"# ERROR: Miembro '{member_name}' no encontrado en '{class_name}'")
             
         elif op == TACOp.FIELD_ASSIGN: # result.arg1 = arg2 (obj.field = value)
             obj_op = inst.result
             field_name = str(inst.arg1.value)
             value_op = inst.arg2
 
-            # --- HACK: Asumir tipo 'Point' ---
-            class_layout = self.class_layouts.get("Point")
+            # --- CORRECCIÓN: Obtener tipo de clase dinámicamente ---
+            class_name = None
+            if obj_op and hasattr(obj_op, 'typ') and obj_op.typ:
+                class_name = str(obj_op.typ)
+
+            class_layout = self.class_layouts.get(class_name)
             
-            offset = 0 # Default offset
-            if class_layout and field_name in class_layout.fields:
-                # ¡Calcular offset real! (Asumiendo que los campos están en orden)
+            if not class_layout:
+                self._emit(f"# ERROR: No se encontró layout de clase '{class_name}' para {field_name}")
+                return 
+            
+            offset = 0
+            if field_name in class_layout.fields:
                 try:
                     field_list = list(class_layout.fields.keys())
                     offset = field_list.index(field_name) * 4
                 except:
-                    offset = 4 if field_name == "y" else 0 # Fallback al hack anterior
+                    self._emit(f"# ERROR: Fallback de offset para {field_name}")
+                    offset = 0
             else:
-                 offset = 4 if field_name == "y" else 0 # Fallback al hack anterior
+                self._emit(f"# ERROR: Campo '{field_name}' no encontrado en '{class_name}'")
+                return
             
             self._emit(f"# (Asignando a campo '{field_name}' en offset {offset})")
             self._load_op("$t0", obj_op)     # t0 = base address
@@ -487,6 +505,10 @@ class MIPSGenerator:
         elif str(op.value).startswith("t"): # Es un temporal 'tK'
             offset = self._get_temp_offset(op.value)
             self._emit(f"lw {reg}, -{offset}($fp)") # Cargar desde stack
+        
+        elif str(op.value).startswith("FP["): # Es una variable local FP[positivo] o param FP[negativo]
+            offset = str(op.value)[3:-1] # Extraer 'offset'
+            self._emit(f"lw {reg}, {offset}($fp)") # Cargar desde stack
 
         # Es una variable global (ej: 'arr' o 'p' que se resolvieron a '0x...')
         # Buscamos si el nombre 'arr' está en el TAC como '0x...'
@@ -545,3 +567,33 @@ class MIPSGenerator:
 
         else:
             self._emit(f"# ADVERTENCIA: _get_addr no sabe cómo obtener dirección de '{op}'")
+
+    
+    def _find_method_implementation_class(self, class_name: str, method_name: str) -> str:
+        """
+        Busca en la jerarquía de herencia la clase que REALMENTE implementa el método.
+        Retorna el nombre de esa clase.
+        """
+        current_class_name = class_name
+        while current_class_name:
+            class_layout = self.class_layouts.get(current_class_name)
+            if not class_layout:
+                return class_name # Fallback: no se encontró la clase base, asumir que es la actual
+
+            # Usar el _ctx (guardado por SymbolCollector) para encontrar el scope
+            class_ctx = getattr(class_layout, "_ctx", None)
+            if class_ctx and class_ctx in self.scopes_by_ctx:
+                class_scope = self.scopes_by_ctx[class_ctx]
+                
+                # Buscar el *símbolo* en el scope de esta clase
+                method_sym = class_scope.symbols.get(method_name)
+                
+                # Si existe Y es una función (no un campo)
+                if method_sym and isinstance(method_sym, FunctionSymbol):
+                    # ¡Encontrado! Esta clase define el método
+                    return current_class_name
+
+            # Si no, subir a la clase base
+            current_class_name = class_layout.base_name
+        
+        return class_name # Fallback: no se encontró, asumir actual

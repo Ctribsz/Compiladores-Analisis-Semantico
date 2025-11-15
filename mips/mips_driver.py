@@ -145,7 +145,7 @@ def main():
             print("Iniciando Fase 3: Generación de código MIPS...")
         
        
-        mips_gen = MIPSGenerator(tac_program, result.global_scope) # <-- PASAR SCOPE
+        mips_gen = MIPSGenerator(tac_program, result.global_scope, result.scopes_by_ctx) 
         mips_code = mips_gen.generate()
         
         if args.verbose:

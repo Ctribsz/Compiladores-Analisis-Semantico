@@ -412,6 +412,12 @@ class TACGenerator(CompiscriptVisitor):
         fname = self._id(ctx)
         self.current_function = fname
         self.in_function = True
+
+        # Detectar si estamos en un método y guardar el nombre de la clase
+        enclosing_class_name = getattr(ctx, "_enclosing_class", None)
+        old_class = self.current_class # Guardar la clase anterior (si la hay)
+        if enclosing_class_name:
+            self.current_class = enclosing_class_name
         
         # Primero intentar en el scope padre actual
         fsym = None
@@ -441,7 +447,12 @@ class TACGenerator(CompiscriptVisitor):
             print(f"  frame_size={getattr(fsym, 'frame_size', 'NO TIENE')}")
         
         # Emitir inicio de función
-        func_op = self._make_variable(fname)
+
+        label_name = fname
+        if enclosing_class_name:
+            label_name = f"{enclosing_class_name}.{fname}"
+            
+        func_op = self._make_variable(label_name)
         self.program.emit(TACOp.FUNC_START, arg1=func_op)
         
         # Emitir ENTER con tamaño del frame
@@ -462,6 +473,7 @@ class TACGenerator(CompiscriptVisitor):
         self._exit_scope()
         self.current_function = None
         self.in_function = False
+        self.current_class = old_class # Restaurar al valor anterior
         return None
     
     # ========== CLASSES ==========
@@ -941,7 +953,8 @@ class TACGenerator(CompiscriptVisitor):
     
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         """Genera código para this"""
-        return self._make_variable("this")
+        # Asignar el tipo de la clase actual
+        return self._make_variable("this", typ=self.current_class)
     
     def _apply_suffix(self, base: TACOperand, suffix_ctx) -> TACOperand:
         """Aplica un sufijo a una expresión base"""
