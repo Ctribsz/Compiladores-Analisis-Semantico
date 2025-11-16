@@ -1015,7 +1015,7 @@ class TACGenerator(CompiscriptVisitor):
         return base
     
     def _apply_call(self, func: TACOperand, call_ctx) -> TACOperand:
-        """Aplica una llamada de función con PUSH/POP"""
+        """Aplica una llamada de función (Corregido: usa $v0, no POP)"""
         # Evaluar y hacer PUSH de argumentos (en orden inverso)
         args_vals = []
         if call_ctx.arguments():
@@ -1036,20 +1036,27 @@ class TACGenerator(CompiscriptVisitor):
             self.last_method_obj = None # Consumirlo
         # ---------------------------------------------------
         
-        # Llamar función - CORRECCIÓN AQUÍ
+        # --- INICIO DE LA CORRECCIÓN ---
         num_args_op = self._make_constant(num_args)
-        # --- CORRECCIÓN: 'func' es el arg1, 'num_args' es el arg2
-        self.program.emit(TACOp.CALL, arg1=func, arg2=num_args_op)
+        
+        # Crear un temporal para el resultado
+        result = self.program.new_temp()
+        result_op = TACOperand(result, is_temp=True)
+
+        # Emitir la LLAMADA con el operando de resultado
+        self.program.emit(TACOp.CALL, 
+                          result=result_op, 
+                          arg1=func, 
+                          arg2=num_args_op)
         
         # Ajustar stack pointer después de llamada
         if num_args > 0:
             bytes_to_pop = num_args * 4
             self.program.emit(TACOp.ADD_SP, arg1=self._make_constant(bytes_to_pop))
         
-        # POP resultado
-        result = self.program.new_temp()
-        self.program.emit(TACOp.POP, result=result)
-        
+        # --- ¡¡¡NO HAY POP!!! ---
+        # --- FIN DE LA CORRECCIÓN ---
+
         # Liberar args temporales
         self._free_if_temp(*args_vals)
         # Liberar 'this' solo si era un temporal
@@ -1060,7 +1067,7 @@ class TACGenerator(CompiscriptVisitor):
         if self.last_method_obj:
             self.last_method_obj = None
 
-        return result
+        return result_op # Devolver el operando 'result_op'
     
     def _apply_index(self, array: TACOperand, index_ctx) -> TACOperand:
         """Aplica acceso a índice de array"""

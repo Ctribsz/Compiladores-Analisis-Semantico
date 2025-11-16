@@ -426,36 +426,54 @@ class MIPSGenerator:
             op_operand = inst.arg1
             op_name = str(op_operand) # "toString", "t_ptr_t3", "fibonacci"
             
-            # --- HACK: Interceptar toString (si aún es necesario) ---
+            # --- HACK: Interceptar toString ---
             if "toString" in op_name:
                 self._emit("# Interceptando llamada a toString -> _int_to_string")
-                self._emit("lw $a0, 0($sp)") # Cargar el entero desde el stack
+                
+                # --- ***** INICIO DE LA CORRECCIÓN ***** ---
+                # Determinar dónde está el entero a convertir
+                num_args_op = inst.arg2
+                num_args = 0
+                if num_args_op and num_args_op.is_constant:
+                    num_args = num_args_op.value
+                
+                if num_args == 2:
+                    # Es una llamada con 'this' (ej: en incrementarEdad)
+                    # El entero está en 4($sp), 'this' está en 0($sp)
+                    self._emit("lw $a0, 4($sp)") 
+                else:
+                    # Es una llamada global (ej: toString(i))
+                    # El entero está en 0($sp)
+                    self._emit("lw $a0, 0($sp)")
+                # --- ***** FIN DE LA CORRECCIÓN ***** ---
+                
                 self._emit("jal _int_to_string")
                 
+                # 'toString' es un caso especial, guardamos su resultado aquí
                 if inst.result:
                     self._store_op("$v0", inst.result)
             
-            # --- ***** INICIO DEL ARREGLO ***** ---
-            elif op_operand.is_temp:
-                # Es un temporal.
-                
-                if "t_ptr_" in op_name:
-                    # Es un puntero a método: TACOperand(value="t_ptr_t4", ...)
-                    # Cargar de memoria y usar JALR.
-                    self._emit(f"# Llamada indirecta a puntero '{op_name}'")
-                    self._load_op("$t0", op_operand)
-                    self._emit("jalr $t0")
-                else:
-                    # Es una función renombrada: TACOperand(value=1, is_temp=True) -> "t1"
-                    # op_name es "t1". Es una etiqueta, usar JAL.
-                    label = self._sanitize_label(op_name)
-                    self._emit(f"jal {label}")
-            # --- ***** FIN DEL ARREGLO ***** ---
+            # --- Llamada a Método (Indirecta) ---
+            elif op_operand.is_temp and "t_ptr_" in op_name:
+                # Es un puntero a método: TACOperand(value="t_ptr_t4", ...)
+                # Cargar de memoria y usar JALR.
+                self._emit(f"# Llamada indirecta a puntero '{op_name}'")
+                self._load_op("$t0", op_operand)
+                self._emit("jalr $t0")
             
+            # --- Llamada a Función (Directa) ---
             else:
-                # No es temporal (ej: "fibonacci", "printString")
+                # Es una función normal (ej: "fibonacci") o un temporal 
+                # renombrado (ej: "t1")
                 label = self._sanitize_label(op_name)
                 self._emit(f"jal {label}")
+
+            # --- ***** INICIO DE LA CORRECCIÓN ***** ---
+            # Para TODAS las llamadas que NO sean 'toString',
+            # si tienen un 'result' (ej: t1 = call fibonacci),
+            # guardar el valor de $v0 en ese temporal.
+            if "toString" not in op_name and inst.result:
+                self._store_op("$v0", inst.result)
             
         elif op == TACOp.ADD_SP: # Limpiar args del stack (SP = SP + 8)
             self._emit(f"addu $sp, $sp, {inst.arg1.value}")
@@ -540,7 +558,9 @@ class MIPSGenerator:
         """
         Emite MIPS para cargar el VALOR de un operando TAC en un registro.
         """
-        
+        if isinstance(op, str):
+            op = TACOperand(op)
+
         if op is None:
              self._emit(f"# ADVERTENCIA: _load_op recibió operando NULO")
              self._emit(f"li {reg}, 0") # Cargar 0 por si acaso
@@ -590,6 +610,10 @@ class MIPSGenerator:
         """
         Emite MIPS para guardar un valor (en reg) en la UBICACIÓN de un operando.
         """
+
+        if isinstance(op, str):
+            op = TACOperand(op)
+            
         if op is None:
              self._emit(f"# ADVERTENCIA: _store_op recibió operando NULO")
              return
