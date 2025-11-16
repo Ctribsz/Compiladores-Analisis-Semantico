@@ -29,6 +29,8 @@ class TACGenerator(CompiscriptVisitor):
         self.switch_stack = []
         self.current_class = None
         self.class_symbols = {}
+        self.last_method_obj: Optional[TACOperand] = None
+        self.current_class = None
         
         # NUEVO: Gestión de memoria y funciones
         self.next_global_addr = 0x1000  # ← FALTA ESTO
@@ -840,31 +842,55 @@ class TACGenerator(CompiscriptVisitor):
         if not sym:
             return self._make_variable(name)
         
-        # ✅ Obtener el tipo del símbolo
         sym_type = str(sym.typ) if hasattr(sym, 'typ') else None
-        
+
+        # --- ***** INICIO DEL ARREGLO (MANEJO DE 'THIS') ***** ---
+        if self.in_function and self.current_class and name == "this":
+            # 'this' siempre está en FP[8] (después de $ra y $fp guardados)
+            fp_ref = TACOperand("FP[8]", typ=sym_type) 
+            temp = self.program.new_temp()
+            temp_op = TACOperand(temp, typ=sym_type)
+            self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
+            return temp_op
+        # --- ***** FIN DEL ARREGLO ***** ---
+
         # Si estamos en función y tiene offset: usar FP[offset]
         if self.in_function and hasattr(sym, 'offset') and sym.offset is not None:
             offset = sym.offset
+            
+            # --- ***** INICIO DEL ARREGLO 2 (CORREGIDO) ***** ---
+            # CORRECCIÓN: Manejar offsets de parámetros (negativos)
+            if offset < 0: 
+                if self.current_class:
+                    # Es un MÉTODO: El 1er arg (offset -4) está en FP[12]
+                    # Fórmula: new_offset = (-offset) + 8
+                    offset = (-offset) + 8 
+                else:
+                    # Es una FUNCIÓN GLOBAL: El 1er arg (offset -4) está en FP[8]
+                    # Fórmula: new_offset = (-offset) + 4
+                    offset = (-offset) + 4
+            # --- ***** FIN DEL ARREGLO 2 ***** ---
+
             fp_ref = TACOperand(f"FP[{offset}]", typ=sym_type)
             
-            if offset < 0:
+            # Cargar parámetros (ahora positivos) y locales (ya positivos)
+            if offset > 0: 
                 temp = self.program.new_temp()
-                temp_op = TACOperand(temp, typ=sym_type)  # ✅ USA sym_type, NO types_by_ctx
+                temp_op = TACOperand(temp, typ=sym_type)
                 self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
                 return temp_op
-            else:
+            else: # Locales (offset == 0) o caso raro
                 return fp_ref
         
-        # Variable global: usar dirección de memoria si existe
+        # Variable global
         if name in self.global_addrs:
+            # ... (código original de global_addrs)
             addr_op = TACOperand(self.global_addrs[name])
             temp = self.program.new_temp()
-            temp_op = TACOperand(temp, typ=sym_type)  # ✅ USA sym_type, NO types_by_ctx
+            temp_op = TACOperand(temp, typ=sym_type)
             self.program.emit(TACOp.DEREF, result=temp_op, arg1=addr_op)
             return temp_op
         
-        # Fallback: referencia directa
         return self._make_variable(name, typ=sym_type)
     
     def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
@@ -925,31 +951,47 @@ class TACGenerator(CompiscriptVisitor):
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         """Genera código para new"""
         class_name = self._id(ctx)
-        temp = self.program.new_temp()
+        temp_obj_ptr = self.program.new_temp() # Este es 'this'
         
-        # Crear nueva instancia
+        # 1. Alocar memoria para el objeto
         class_op = self._make_variable(class_name)
-        self.program.emit(TACOp.NEW, temp, class_op)
+        self.program.emit(TACOp.NEW, temp_obj_ptr, class_op)
         
-        # Si hay argumentos, llamar al constructor
+        # 2. Si hay constructor, llamarlo
         if ctx.arguments():
-            # Pasar argumentos (y registrar para liberar luego)
+            # Visitar todos los argumentos explícitos
             arg_values: List[TACOperand] = []
             for expr in ctx.arguments().expression():
-                arg = self.visit(expr)
-                self.program.emit(TACOp.PUSH, arg1=arg)
-                arg_values.append(arg)
+                arg_values.append(self.visit(expr))
+
+            # PUSH argumentos explícitos (en orden inverso, como _apply_call)
+            for arg_op in reversed(arg_values):
+                self.program.emit(TACOp.PUSH, arg1=arg_op)
             
-            # Llamar constructor
+            # --- FIX: PUSH 'this' (puntero al objeto) al final ---
+            # (Se convierte en el 1er argumento)
+            self.program.emit(TACOp.PUSH, arg1=temp_obj_ptr)
+
+            # 3. Llamar al constructor
             ctor_name = f"{class_name}.constructor"
             ctor_op = self._make_variable(ctor_name)
-            num_args = len(arg_values)
-            self.program.emit(TACOp.CALL, arg1=ctor_op, arg2=self._make_constant(num_args))
             
-            # Liberar args temporales
+            num_args = len(arg_values) + 1 # args explícitos + 'this'
+            num_args_op = self._make_constant(num_args)
+            
+            # Los constructores no retornan valor (en TAC)
+            self.program.emit(TACOp.CALL, arg1=ctor_op, arg2=num_args_op)
+            
+            # --- FIX: Limpiar stack (¡¡ESTO FALTABA!!) ---
+            if num_args > 0:
+                bytes_to_pop = num_args * 4
+                self.program.emit(TACOp.ADD_SP, arg1=self._make_constant(bytes_to_pop))
+
+            # 5. Liberar temporales de los args
             self._free_if_temp(*arg_values)
         
-        return temp
+        # 6. Retornar el puntero al objeto
+        return temp_obj_ptr
     
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         """Genera código para this"""
@@ -983,11 +1025,21 @@ class TACGenerator(CompiscriptVisitor):
         for arg in reversed(args_vals):
             self.program.emit(TACOp.PUSH, arg1=arg)
         
+        # --- FIX: PUSH 'this' si es una llamada a método ---
         num_args = len(args_vals)
+        obj_to_free = None # Para no liberar 'this' si no es temporal
+        if self.last_method_obj:
+            self.program.emit(TACOp.PUSH, arg1=self.last_method_obj)
+            num_args += 1
+            # Guardamos para liberar solo si es temporal
+            obj_to_free = self.last_method_obj 
+            self.last_method_obj = None # Consumirlo
+        # ---------------------------------------------------
         
         # Llamar función - CORRECCIÓN AQUÍ
         num_args_op = self._make_constant(num_args)
-        self.program.emit(TACOp.CALL, arg1=func, arg2=num_args_op)  # ← func primero, luego num_args
+        # --- CORRECCIÓN: 'func' es el arg1, 'num_args' es el arg2
+        self.program.emit(TACOp.CALL, arg1=func, arg2=num_args_op)
         
         # Ajustar stack pointer después de llamada
         if num_args > 0:
@@ -1000,6 +1052,14 @@ class TACGenerator(CompiscriptVisitor):
         
         # Liberar args temporales
         self._free_if_temp(*args_vals)
+        # Liberar 'this' solo si era un temporal
+        if obj_to_free:
+             self._free_if_temp(obj_to_free)
+
+        # MUY IMPORTANTE: Limpiar last_method_obj si no se usó
+        if self.last_method_obj:
+            self.last_method_obj = None
+
         return result
     
     def _apply_index(self, array: TACOperand, index_ctx) -> TACOperand:
@@ -1015,9 +1075,29 @@ class TACGenerator(CompiscriptVisitor):
         """Aplica acceso a propiedad"""
         prop_name = self._id(prop_ctx)
         prop_op = self._make_constant(prop_name)
-        result = self.program.new_temp()
-        self.program.emit(TACOp.FIELD_ACCESS, result, obj, prop_op)
-        return result
+        
+        # --- ***** INICIO DEL ARREGLO ***** ---
+        # Distinguir entre acceso a campo y acceso a método
+        obj_type = str(obj.typ)
+        class_sym = self.global_scope.resolve(obj_type)
+        
+        result_op: TACOperand
+        
+        if class_sym and prop_name in class_sym.methods:
+            # Es un puntero a método. Usar un nombre especial que NO sea "tN"
+            # para que el optimizador no lo confunda con un temporal regular.
+            temp_name = f"t_ptr_{self.program.new_temp()}"
+            result_op = TACOperand(temp_name, is_temp=True) 
+        else:
+            # Es un acceso a campo, usar un temporal normal
+            temp_name = self.program.new_temp()
+            result_op = TACOperand(temp_name, is_temp=True)
+        # --- ***** FIN DEL ARREGLO ***** ---
+            
+        self.program.emit(TACOp.FIELD_ACCESS, result_op, obj, prop_op)
+        self.last_method_obj = obj
+        
+        return result_op # Devolver el operando completo
     
     # ========== TRY-CATCH ==========
     def visitTryCatchStatement(self, ctx: CompiscriptParser.TryCatchStatementContext):

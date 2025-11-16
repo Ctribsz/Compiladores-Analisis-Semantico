@@ -14,11 +14,25 @@ def _const_val(x):
     return getattr(x, "value", x)
 
 def _is_temp_name(x) -> bool:
-    """Chequea si un operando es un temporal (ej: t1, tt1, t_loop)"""
+    """Chequea si un operando es un temporal (ej: t1, t2)"""
     s = str(_const_val(x))
-    # La regla simple: si empieza con 't' y no es 'true' o 'this', es un temporal.
-    return isinstance(s, str) and s.startswith("t") and s not in ("true", "this")
-# -----------------------------------
+    
+    # --- ***** INICIO DEL ARREGLO ***** ---
+    # Un temporal es tN (un número).
+    # Nombres de funciones como 'toString' o 't_ptr_...' NO son temporales.
+    if not s.startswith("t"):
+        return False
+    if s in ("true", "this"):
+        return False
+    
+    # Intentar convertir el resto a int. Si falla, NO es tN.
+    try:
+        # Esto funciona para "t1", "t2", "t10"
+        int(s[1:])
+        return True 
+    except (ValueError, TypeError):
+        # Esto falla para "toString", "t_loop", "t_ptr_t4"
+        return False
 
 @dataclass
 class LivenessInfo:
@@ -433,6 +447,7 @@ class TACOptimizer:
             result.append(inst)
         return result
 
+
     def eliminate_copy_chains(self, instructions: List[TACInstruction]) -> List[TACInstruction]:
         """
         Elimina cadenas de copias transitivas dentro de regiones lineales.
@@ -463,25 +478,39 @@ class TACOptimizer:
             a1 = inst.arg1
             a2 = inst.arg2
             
-            # Solo sustituir si a1 no es None Y está en el mapa
+            # --- ***** INICIO DEL ARREGLO ***** ---
             if a1 is not None and str(a1) in copy_map:
-                # Crear nuevo operando preservando el tipo de a1
-                new_name = copy_map[str(a1)]
+                new_name = copy_map[str(a1)] # e.g., "t1"
+                new_val = new_name
+                is_temp = _is_temp_name(new_name)
+                if is_temp:
+                    try:
+                        new_val = int(new_name[1:]) # "t1" -> 1
+                    except ValueError:
+                        pass # Keep "t_loop" as string
+
                 a1 = TACOperand(
-                    value=new_name,
-                    is_temp=_is_temp_name(new_name),
+                    value=new_val,
+                    is_temp=is_temp,
                     typ=a1.typ if hasattr(a1, 'typ') else None
                 )
             
-            # Solo sustituir si a2 no es None Y está en el mapa
             if a2 is not None and str(a2) in copy_map:
-                # Crear nuevo operando preservando el tipo de a2
-                new_name = copy_map[str(a2)]
+                new_name = copy_map[str(a2)] # e.g., "t2"
+                new_val = new_name
+                is_temp = _is_temp_name(new_name)
+                if is_temp:
+                    try:
+                        new_val = int(new_name[1:]) # "t2" -> 2
+                    except ValueError:
+                        pass 
+
                 a2 = TACOperand(
-                    value=new_name,
-                    is_temp=_is_temp_name(new_name),
+                    value=new_val,
+                    is_temp=is_temp,
                     typ=a2.typ if hasattr(a2, 'typ') else None
                 )
+            # --- ***** FIN DEL ARREGLO ***** ---
             
             # Crear nueva instrucción preservando tipos
             new_inst = TACInstruction(
@@ -688,7 +717,7 @@ class TACOptimizer:
                     if name in coloring:
                         # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
                         return TACOperand(
-                            value=f"t{coloring[name]}",
+                            value=coloring[name],
                             is_temp=True,
                             typ=op.typ if hasattr(op, 'typ') else None
                         )
@@ -903,7 +932,7 @@ class TACOptimizer:
             result.append(inst)
         
         return result
-    
+
     def copy_propagation(self, instructions):
         """Propagación de copias local a bloque lineal"""
         boundaries = {
@@ -939,23 +968,45 @@ class TACOptimizer:
             if inst.op != TACOp.DEREF:
                 if a1 is not None and not _is_const(a1):
                     new_name = root(str(a1))
-                    # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+                    
+                    # --- ***** INICIO DEL ARREGLO ***** ---
+                    # Convierte "t1" -> 1, "t2" -> 2, etc.
+                    new_val = new_name
+                    is_temp = _is_temp_name(new_name)
+                    if is_temp:
+                        try:
+                            # "t1" -> 1. "t_loop" -> Falla y se queda como string
+                            new_val = int(new_name[1:]) 
+                        except ValueError:
+                            pass 
                     a1 = TACOperand(
-                        value=new_name,
-                        is_temp=_is_temp_name(new_name),
+                        value=new_val,
+                        is_temp=is_temp,
+                    # --- ***** FIN DEL ARREGLO ***** ---
                         typ=a1.typ if hasattr(a1, 'typ') else None
                     )
 
             # arg2 siempre es seguro de sustituir
             if a2 is not None and not _is_const(a2):
                 new_name = root(str(a2))
-                # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+
+                # --- ***** INICIO DEL ARREGLO ***** ---
+                # Convierte "t2" -> 2
+                new_val = new_name
+                is_temp = _is_temp_name(new_name)
+                if is_temp:
+                    try:
+                        new_val = int(new_name[1:]) # "t2" -> 2
+                    except ValueError:
+                        pass
                 a2 = TACOperand(
-                    value=new_name,
-                    is_temp=_is_temp_name(new_name),
+                    value=new_val,
+                    is_temp=is_temp,
+                # --- ***** FIN DEL ARREGLO ***** ---
                     typ=a2.typ if hasattr(a2, 'typ') else None
                 )
-
+            
+            # --- (El resto de la función es igual) ---
             new_inst = TACInstruction(inst.op, self._copy_operand_with_type(inst.result), a1, a2)
 
             if new_inst.result is not None:

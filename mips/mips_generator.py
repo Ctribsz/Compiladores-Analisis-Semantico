@@ -16,6 +16,21 @@ from mips.runtime import get_data_preamble, get_text_preamble, get_syscall_helpe
 from semantic.scope import Scope
 from semantic.symbols import ClassSymbol, FunctionSymbol 
 
+def _is_const(x) -> bool:
+    return getattr(x, "is_constant", False)
+
+def _const_val(x):
+    return getattr(x, "value", x)
+
+def _is_temp_name(x_val) -> bool:
+    """
+    Chequea si un operando (o su string) es un temporal.
+    La regla simple: si empieza con 't' y no es 'true' o 'this'.
+    """
+    s = str(x_val)
+    return s.startswith("t") and s not in ("true", "this")
+
+
 class MIPSGenerator:
     """
     Toma un TACProgram y genera un string de código MIPS.
@@ -75,18 +90,53 @@ class MIPSGenerator:
         self.mips_code.append("\n# === SECCIÓN DE CÓDIGO ===")
         self._emit(get_text_preamble(), indent=0)
         
-        # ========== NUEVO: INICIALIZAR $fp y $sp para main ==========
-        self._emit("# Inicializar frame pointer para main", indent=1)
+        # ========== MODIFICADO: AÑADIR SALTO INICIAL ==========
+        self._emit("# Inicializar frame pointer y saltar a script principal", indent=1)
         self._emit("move $fp, $sp", indent=1)
         self._emit("subu $sp, $sp, 200  # Reservar espacio para temporales", indent=1)
+        self._emit("j _script_start          # Saltar sobre definiciones de funciones", indent=1)
+        self._emit("", indent=0) # Línea en blanco para separar
         # ===========================================================
         
         # 5. Traducir cada instrucción TAC
+        
+        # --- NUEVA LÓGICA DE ETIQUETA ---
+        in_function = False
+        script_start_emitted = False
+        
         for inst in self.program.instructions:
+            if inst.op == TACOp.FUNC_START:
+                in_function = True
+            
+            # --- INSERTAR ETIQUETA ANTES DEL SCRIPT PRINCIPAL ---
+            # Si NO estamos en una función, y NO hemos puesto la etiqueta...
+            if not in_function and not script_start_emitted:
+                # Esta es la primera instrucción fuera de una función
+                self._emit("_script_start:", indent=0)
+                script_start_emitted = True
+                self._emit("# Reseteando estado de frame para main", indent=2)
+                self.temp_map = {}
+                self.current_frame_size = 0  # main no tiene 'ENTER', su frame es 0
+                self.current_temp_offset = 0 # Empezar temporales desde 0
+            
+            # Traducir la instrucción
             self._emit(f"# {inst}", indent=1)
             self._translate_instruction(inst)
-        
-        # ========== NUEVO: TERMINAR PROGRAMA LIMPIAMENTE ==========
+            
+            # Marcar que salimos de la función
+            if inst.op == TACOp.FUNC_END:
+                in_function = False
+                self._emit("", indent=0) # Añadir espacio después de funciones
+        # --- FIN LÓGICA DE ETIQUETA ---
+
+        # (Fallback por si el script no tiene funciones)
+        if not script_start_emitted:
+             self._emit("_script_start:", indent=0)
+             # Aplicar el reset aquí también por si acaso
+             self.temp_map = {}
+             self.current_frame_size = 0
+             self.current_temp_offset = 0
+                 
         self._emit("\n# Terminar programa", indent=1)
         self._emit("jal _exit", indent=1)
         # =========================================================
@@ -320,7 +370,7 @@ class MIPSGenerator:
 
         # --- Funciones y Stack ---
         elif op == TACOp.FUNC_START:
-            label = str(inst.arg1.value)  # Obtener nombre original
+            label = str(inst.arg1)  # Obtener nombre original
             
             # Si es un constructor o método de clase, mantener el formato Class_method
             if "." in label:
@@ -373,39 +423,37 @@ class MIPSGenerator:
             self._emit("sw $t0, 0($sp)")
             
         elif op == TACOp.CALL:
-            op_name = str(inst.arg1.value)
+            op_operand = inst.arg1
+            op_name = str(op_operand) # "toString", "t_ptr_t3", "fibonacci"
             
-            # --- HACK: Interceptar toString ---
-            # Si el nombre termina en "toString" (para cubrir prefijos de clase si los hubiera)
+            # --- HACK: Interceptar toString (si aún es necesario) ---
             if "toString" in op_name:
                 self._emit("# Interceptando llamada a toString -> _int_to_string")
-                self._load_op("$a0", inst.arg2)  # Cargar el argumento (el entero)
-                # NOTA: En tu TAC, CALL arg1 es la función, arg2 es el numero de args o el argumento.
-                # Revisando tu TACGenerator: CALL arg1=func, arg2=num_args.
-                # LOS ARGUMENTOS YA ESTÁN EN EL STACK (PUSH).
-                
-                # Corrección: Los argumentos se pasaron con PUSH.
-                # _int_to_string espera el argumento en $a0.
-                # Como acabamos de hacer PUSH del entero, está en 0($sp).
-                # OJO: El TAC Generator hace:
-                # PUSH arg
-                # CALL func, num_args
-                # ADD_SP ...
-                
-                # Entonces, justo antes del CALL, el argumento está en el tope del stack.
                 self._emit("lw $a0, 0($sp)") # Cargar el entero desde el stack
                 self._emit("jal _int_to_string")
                 
-                # El resultado queda en $v0, el TAC espera que CALL guarde en result si existe
                 if inst.result:
                     self._store_op("$v0", inst.result)
             
-            elif op_name.startswith("t"):
-                # Es una llamada indirecta (ej: call t1, donde t1 tiene addr(getX))
-                self._load_op("$t0", inst.arg1) # Cargar la dirección (de t1) en $t0
-                self._emit("jalr $t0")          # Jump And Link Register
+            # --- ***** INICIO DEL ARREGLO ***** ---
+            elif op_operand.is_temp:
+                # Es un temporal.
+                
+                if "t_ptr_" in op_name:
+                    # Es un puntero a método: TACOperand(value="t_ptr_t4", ...)
+                    # Cargar de memoria y usar JALR.
+                    self._emit(f"# Llamada indirecta a puntero '{op_name}'")
+                    self._load_op("$t0", op_operand)
+                    self._emit("jalr $t0")
+                else:
+                    # Es una función renombrada: TACOperand(value=1, is_temp=True) -> "t1"
+                    # op_name es "t1". Es una etiqueta, usar JAL.
+                    label = self._sanitize_label(op_name)
+                    self._emit(f"jal {label}")
+            # --- ***** FIN DEL ARREGLO ***** ---
+            
             else:
-                # Es una llamada estática (ej: call add)
+                # No es temporal (ej: "fibonacci", "printString")
                 label = self._sanitize_label(op_name)
                 self._emit(f"jal {label}")
             
@@ -492,7 +540,14 @@ class MIPSGenerator:
         """
         Emite MIPS para cargar el VALOR de un operando TAC en un registro.
         """
-        op_val_str = str(op.value)
+        
+        if op is None:
+             self._emit(f"# ADVERTENCIA: _load_op recibió operando NULO")
+             self._emit(f"li {reg}, 0") # Cargar 0 por si acaso
+             return
+
+        op_name = str(op) # <-- FIX: Usar str(op) como el nombre/llave
+
         if op.is_constant:
             if isinstance(op.value, str):
                 # Cargar dirección de string
@@ -502,26 +557,25 @@ class MIPSGenerator:
                 val = 1 if op.value is True else (0 if op.value is False else op.value)
                 self._emit(f"li {reg}, {val}")
         
-        elif str(op.value).startswith("t"): # Es un temporal 'tK'
-            offset = self._get_temp_offset(op.value)
+        elif op_name == "this":
+            self._emit(f"# Cargando 'this' (desde FP[8])")
+            self._emit(f"lw {reg}, 8($fp)")
+        
+        elif _is_temp_name(op_name): # <-- FIX: Usar _is_temp_name(op_name)
+            offset = self._get_temp_offset(op_name) # <-- FIX: Usar op_name
             self._emit(f"lw {reg}, -{offset}($fp)") # Cargar desde stack
         
-        elif str(op.value).startswith("FP["): # Es una variable local FP[positivo] o param FP[negativo]
-            offset = str(op.value)[3:-1] # Extraer 'offset'
+        elif op_name.startswith("FP["): # <-- FIX: Usar op_name
+            offset = op_name[3:-1] # Extraer 'offset'
             self._emit(f"lw {reg}, {offset}($fp)") # Cargar desde stack
 
-        # Es una variable global (ej: 'arr' o 'p' que se resolvieron a '0x...')
-        # Buscamos si el nombre 'arr' está en el TAC como '0x...'
-        elif op_val_str in self.globals:
-            label = f"global_{op_val_str[2:]}"
+        elif op_name in self.globals: # <-- FIX: Usar op_name
+            label = f"global_{op_name[2:]}"
             self._emit(f"la $at, {label}")    # Cargar dirección global
             self._emit(f"lw {reg}, 0($at)")   # Cargar VALOR en esa dirección
-
         
         else:
-            # Fallback (podría ser un nombre de var, etc.)
-            # Asumimos que es un error o un tipo no manejado
-            self._emit(f"# ADVERTENCIA: _load_op no sabe cómo cargar '{op}'")
+            self._emit(f"# ADVERTENCIA: _load_op no sabe cómo cargar '{op_name}'")
 
     def _sanitize_label(self, label: str) -> str:
         """Reemplaza caracteres no válidos de MIPS por '_'."""
@@ -536,21 +590,27 @@ class MIPSGenerator:
         """
         Emite MIPS para guardar un valor (en reg) en la UBICACIÓN de un operando.
         """
-        if str(op.value).startswith("t"): # Temporal 'tK'
-            offset = self._get_temp_offset(op.value)
+        if op is None:
+             self._emit(f"# ADVERTENCIA: _store_op recibió operando NULO")
+             return
+
+        op_name = str(op) # <-- FIX: Usar str(op) como el nombre/llave
+
+        if _is_temp_name(op_name): # <-- FIX: Usar _is_temp_name(op_name)
+            offset = self._get_temp_offset(op_name) # <-- FIX: Usar op_name
             self._emit(f"sw {reg}, -{offset}($fp)") # Guardar en stack
         
-        elif str(op.value).startswith("0x"): # Global '0x...'
-            label = f"global_{op.value[2:]}"
+        elif op_name.startswith("0x"): # <-- FIX: Usar op_name
+            label = f"global_{op_name[2:]}"
             self._emit(f"la $at, {label}") # Cargar dirección global en $at
             self._emit(f"sw {reg}, 0($at)") # Guardar valor en esa dirección
 
-        elif str(op.value).startswith("FP["): # Local/Param 'FP[offset]'
-            offset = str(op.value)[3:-1] # Extraer 'offset'
+        elif op_name.startswith("FP["): # <-- FIX: Usar op_name
+            offset = op_name[3:-1] # Extraer 'offset'
             self._emit(f"sw {reg}, {offset}($fp)")
 
         else:
-            self._emit(f"# ADVERTENCIA: _store_op no sabe cómo guardar en '{op}'")
+            self._emit(f"# ADVERTENCIA: _store_op no sabe cómo guardar en '{op_name}'")
 
     def _get_addr(self, reg: str, op: TACOperand):
         """
