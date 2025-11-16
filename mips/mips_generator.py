@@ -379,26 +379,37 @@ class MIPSGenerator:
             if size > 0:
                 self._emit(f"subu $sp, $sp, {size}")
 
-        elif op == TACOp.LEAVE:  # Epilog
-            # Restaurar stack frame
+        elif op == TACOp.LEAVE: # Epilog
+            # Este código AHORA solo se usará si la función
+            # termina sin un 'return' explícito.
             if self.current_frame_size > 0:
                 self._emit(f"addu $sp, $sp, {self.current_frame_size}")
+            
             self._emit("lw $ra, 4($sp)")
             self._emit("lw $fp, 0($sp)")
             self._emit("addu $sp, $sp, 8")
-            self._emit("jr $ra")  # Retornar al llamador
+            
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # ¡FALTABA ESTO! Las funciones sin 'return' deben retornar.
+            self._emit("jr $ra")
+            # --- ***** FIN DE CORRECCIÓN ***** ---
             
         elif op == TACOp.RETURN:
+            # --- ***** INICIO DE CORRECCIÓN TOTAL ***** ---
+            
+            # 1. Cargar el valor de retorno (si existe) MIENTRAS $fp es válido
             if inst.arg1:
-                self._load_op("$v0", inst.arg1)  # $v0 = valor de retorno
-            # El epílogo completo se emite en LEAVE
-            # Pero si hay return antes de leave, necesitamos saltar al epílogo
-            # O simplemente emitir el epílogo aquí también
+                self._load_op("$v0", inst.arg1) # $v0 = valor de retorno
+            
+            # 2. Emitir el EPÍLOGO (LEAVE) aquí mismo
             if self.current_frame_size > 0:
                 self._emit(f"addu $sp, $sp, {self.current_frame_size}")
-            self._emit("lw $ra, 4($sp)")
-            self._emit("lw $fp, 0($sp)")
+            
+            self._emit("lw $ra, 4($sp)") # Restaurar $ra
+            self._emit("lw $fp, 0($sp)") # Restaurar $fp
             self._emit("addu $sp, $sp, 8")
+            
+            # 3. Saltar a la dirección de retorno ($ra) AHORA RESTAURADA
             self._emit("jr $ra")
 
         # --- Llamadas ---
