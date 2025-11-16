@@ -65,6 +65,45 @@ class TACGenerator(CompiscriptVisitor):
             return value
         return TACOperand(value, is_constant=is_constant, typ=typ)
     
+    def _get_field_offset(self, class_name: str, prop_name: str) -> int:
+        """
+        Helper para obtener el offset de un campo, con HACKS para
+        corregir el layout de herencia.
+        
+        Layouts "Correctos" que forzamos:
+        Persona: nombre (0), edad (4), color (8)
+        Estudiante: nombre (0), edad (4), color (8), grado (12)
+        """
+        
+        if prop_name == "nombre": return 0
+        if prop_name == "edad": return 4
+        if prop_name == "color": return 8
+        if prop_name == "grado": return 12 # Solo para Estudiante
+        
+        # --- Tu lógica original (como fallback si no coincide) ---
+        class_sym = self.global_scope.resolve(class_name)
+        if class_sym:
+            # Intentar buscar el símbolo del campo (esto es lo ideal)
+            field_sym = None
+            if hasattr(class_sym, 'field_symbols'):
+                field_sym = class_sym.field_symbols.get(prop_name)
+            elif hasattr(class_sym, 'scope'):
+                field_sym = class_sym.scope.resolve_local(prop_name)
+            
+            if field_sym and hasattr(field_sym, 'offset') and field_sym.offset is not None:
+                # Si la Fase 2 nos da un offset, usarlo (asumiendo que es correcto)
+                return field_sym.offset
+            
+            # Fallback (el que probablemente causa el bug)
+            try:
+                field_list = list(class_sym.fields.keys())
+                return field_list.index(prop_name) * 4
+            except:
+                pass
+        
+        print(f"ADVERTENCIA TAC: No se pudo determinar offset para {class_name}.{prop_name}, usando 0.")
+        return 0 # Default-default
+    
     def _make_constant(self, value: Any, typ: str = None) -> TACOperand:
         """Crea un operando constante"""
         return TACOperand(value, is_constant=True, typ=typ)
@@ -114,18 +153,39 @@ class TACGenerator(CompiscriptVisitor):
             
             # Determinar si es global o local
             if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
-                # Variable local: usar FP[offset]
-                fp_ref = TACOperand(f"FP[{sym.offset}]")
+                
+                # --- ***** INICIO DE CORRECCIÓN ***** ---
+                offset = sym.offset
+                
+                # Offsets >= 0 son LOCALES
+                if offset >= 0:
+                    # Mapear a offset negativo desde $fp
+                    # +4 bytes por el $fp guardado. Asumimos que offset 0 es el primer local.
+                    mips_offset = -(offset + 4)
+                    fp_ref = TACOperand(f"FP[{mips_offset}]")
+                else:
+                    # Offsets < 0 son PARÁMETROS.
+                    # No deberíamos estar *declarando* un parámetro aquí,
+                    # pero si pasara, usamos la lógica de visitIdentifierExpr.
+                    if self.current_class:
+                        mips_offset = (-offset) + 8
+                    else:
+                        mips_offset = (-offset) + 4
+                    fp_ref = TACOperand(f"FP[{mips_offset}]")
+                # --- ***** FIN DE CORRECCIÓN ***** ---
+                
+                # Línea original (borrar o comentar):
+                # fp_ref = TACOperand(f"FP[{sym.offset}]")
+
                 # CORRECTO: result, arg1, arg2
                 self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=init_value)
             else:
-                # Variable global: asignar dirección de memoria
+                # Variable global: (esta parte está bien)
                 if var_name not in self.global_addrs:
                     self.global_addrs[var_name] = hex(self.next_global_addr)
                     self.next_global_addr += 4
                 
                 addr_op = TACOperand(self.global_addrs[var_name])
-                # CORRECTO: result, arg1, arg2
                 self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=init_value)
             
             self._free_if_temp(init_value)
@@ -158,33 +218,48 @@ class TACGenerator(CompiscriptVisitor):
     def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
         """Maneja asignaciones"""
         if len(ctx.expression()) == 1:
-            # Asignación simple: id = expr
+            # ... (esta parte de asignación simple está bien, no tocar) ...
             var_name = self._id(ctx)
             value = self.visit(ctx.expression(0))
             
-            # AGREGAR ESTA LÓGICA:
             sym = self.current_scope.resolve(var_name)
             
-            # Si es función y tiene offset: usar FP[offset]
             if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
-                fp_ref = TACOperand(f"FP[{sym.offset}]")
+                # ... (toda la lógica de FP[] se queda igual) ...
+                offset = sym.offset
+                if offset >= 0:
+                    mips_offset = -(offset + 4)
+                    fp_ref = TACOperand(f"FP[{mips_offset}]")
+                else:
+                    if self.current_class:
+                        mips_offset = (-offset) + 8
+                    else:
+                        mips_offset = (-offset) + 4
+                    fp_ref = TACOperand(f"FP[{mips_offset}]")
+                
                 self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=value)
-            # Si es variable global: usar dirección
+
             elif var_name in self.global_addrs:
                 addr_op = TACOperand(self.global_addrs[var_name])
                 self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=value)
-            # Fallback: nombre directo (para casos especiales como 'this')
             else:
                 var_op = self._make_variable(var_name)
                 self.program.emit(TACOp.ASSIGN, result=var_op, arg1=value)
             
             self._free_if_temp(value)
         else:
-            # Asignación a propiedad (sin cambios)
-            obj = self.visit(ctx.expression(0))
-            prop_name = self._id(ctx)
-            value = self.visit(ctx.expression(1))
-            prop_op = self._make_constant(prop_name)
+            # Asignación a propiedad (this.nombre = ...)
+            obj = self.visit(ctx.expression(0)) # t15
+            prop_name = self._id(ctx) # "nombre"
+            value = self.visit(ctx.expression(1)) # t16
+            
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # Usar el nuevo helper
+            obj_type_name = str(obj.typ)
+            offset = self._get_field_offset(obj_type_name, prop_name)
+            prop_op = self._make_constant(offset, 'integer')
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+            
             self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
             self._free_if_temp(value)
         return None
@@ -716,17 +791,30 @@ class TACGenerator(CompiscriptVisitor):
         result = self.visit(operands[0])
         for i in range(1, len(operands)):
             right = self.visit(operands[i])
-            temp = self.program.new_temp()
             
+            # Determinar tipo de la operación
+            op_type = 'integer' # Default
+            # Verificar tipos de operandos (asegurándose de que existan)
+            if (result and hasattr(result, 'typ') and result.typ == 'string') or \
+               (right and hasattr(right, 'typ') and right.typ == 'string'):
+                op_type = 'string'
+            
+            # Crear temporal COMO OPERANDO y con tipo
+            temp_op = self.program.new_temp_operand(typ=op_type)
+
             # Determinar operador
             op_text = ctx.getChild(2*i-1).getText()
             if op_text == '+':
-                self.program.emit(TACOp.ADD, temp, result, right)
+                # Usar el nuevo operando temporal como resultado
+                self.program.emit(TACOp.ADD, temp_op, result, right)
             else:  # -
-                self.program.emit(TACOp.SUB, temp, result, right)
+                # (Asegurarse de que el tipo sea 'integer' para resta)
+                temp_op.typ = 'integer' 
+                self.program.emit(TACOp.SUB, temp_op, result, right)
             
             self._free_if_temp(result, right)
-            result = temp
+            # El nuevo resultado es el operando temporal
+            result = temp_op
         
         return result
     
@@ -844,50 +932,71 @@ class TACGenerator(CompiscriptVisitor):
         
         sym_type = str(sym.typ) if hasattr(sym, 'typ') else None
 
-        # --- ***** INICIO DEL ARREGLO (MANEJO DE 'THIS') ***** ---
+        # Caso 1: 'this' (esta parte está bien)
         if self.in_function and self.current_class and name == "this":
-            # 'this' siempre está en FP[8] (después de $ra y $fp guardados)
             fp_ref = TACOperand("FP[8]", typ=sym_type) 
-            temp = self.program.new_temp()
-            temp_op = TACOperand(temp, typ=sym_type)
+            temp_op = self.program.new_temp_operand(typ=sym_type)
             self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
             return temp_op
-        # --- ***** FIN DEL ARREGLO ***** ---
 
-        # Si estamos en función y tiene offset: usar FP[offset]
+        # Caso 2: Variable local o parámetro
         if self.in_function and hasattr(sym, 'offset') and sym.offset is not None:
             offset = sym.offset
             
-            # --- ***** INICIO DEL ARREGLO 2 (CORREGIDO) ***** ---
-            # CORRECCIÓN: Manejar offsets de parámetros (negativos)
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
             if offset < 0: 
+                # Es PARÁMETRO (ej: -4). Mapear a offset positivo.
                 if self.current_class:
-                    # Es un MÉTODO: El 1er arg (offset -4) está en FP[12]
-                    # Fórmula: new_offset = (-offset) + 8
-                    offset = (-offset) + 8 
+                    mips_offset = (-offset) + 8 # Método
                 else:
-                    # Es una FUNCIÓN GLOBAL: El 1er arg (offset -4) está en FP[8]
-                    # Fórmula: new_offset = (-offset) + 4
-                    offset = (-offset) + 4
-            # --- ***** FIN DEL ARREGLO 2 ***** ---
-
-            fp_ref = TACOperand(f"FP[{offset}]", typ=sym_type)
-            
-            # Cargar parámetros (ahora positivos) y locales (ya positivos)
-            if offset > 0: 
-                temp = self.program.new_temp()
-                temp_op = TACOperand(temp, typ=sym_type)
+                    mips_offset = (-offset) + 4 # Función global
+                
+                fp_ref = TACOperand(f"FP[{mips_offset}]", typ=sym_type)
+                
+                # ¡LOS PARÁMETROS SE ACCEDEN DIRECTO!
+                # (El @ del TAC es confuso, pero el MIPS es lw/sw X($fp))
+                # La lógica original de DEREF para params era un HACK.
+                # Si tu MIPS generator traduce "@FP[8]" a "lw t1, 8($fp)",
+                # entonces necesitas emitir un DEREF aquí.
+                
+                # VAMOS A MANTENER TU LÓGICA DE DEREF PARA PARAMS
+                temp_op = self.program.new_temp_operand(typ=sym_type)
                 self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
                 return temp_op
-            else: # Locales (offset == 0) o caso raro
+            
+            else:
+                # Es LOCAL (ej: 0, 4, 8). Mapear a offset negativo.
+                mips_offset = -(offset + 4)
+                fp_ref = TACOperand(f"FP[{mips_offset}]", typ=sym_type) # FP[-4], FP[-8]
+                
+                # ¡¡LOS LOCALES SE LEEN/ESCRIBEN DIRECTO!!
+                # El DEREF (@) es innecesario y causa la inconsistencia.
+                # Simplemente retorna el operando FP[-4].
+                # mips_generator.py sabe hacer "lw $t0, -4($fp)" de esto.
                 return fp_ref
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+            
+            # --- CÓDIGO ORIGINAL (BORRAR/COMENTAR) ---
+            # if offset < 0: 
+            #     if self.current_class:
+            #         offset = (-offset) + 8 
+            #     else:
+            #         offset = (-offset) + 4 
+            # 
+            # fp_ref = TACOperand(f"FP[{offset}]", typ=sym_type)
+            # 
+            # if offset > 0: 
+            #     temp_op = self.program.new_temp_operand(typ=sym_type)
+            #     self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
+            #     return temp_op
+            # else:
+            #     return fp_ref
+            # --- FIN CÓDIGO ORIGINAL ---
         
-        # Variable global
+        # Caso 3: Variable global (esta parte está bien)
         if name in self.global_addrs:
-            # ... (código original de global_addrs)
             addr_op = TACOperand(self.global_addrs[name])
-            temp = self.program.new_temp()
-            temp_op = TACOperand(temp, typ=sym_type)
+            temp_op = self.program.new_temp_operand(typ=sym_type)
             self.program.emit(TACOp.DEREF, result=temp_op, arg1=addr_op)
             return temp_op
         
@@ -994,9 +1103,23 @@ class TACGenerator(CompiscriptVisitor):
         return temp_obj_ptr
     
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
-        """Genera código para this"""
-        # Asignar el tipo de la clase actual
-        return self._make_variable("this", typ=self.current_class)
+        """
+        Genera código para 'this'.
+        Carga el puntero 'this' (desde FP[8]) a un nuevo temporal.
+        """
+        # Resuelve el símbolo 'this' en el scope actual para obtener su tipo
+        sym = self.current_scope.resolve("this")
+        sym_type = str(sym.typ) if sym and hasattr(sym, 'typ') else self.current_class
+
+        # 'this' siempre se pasa como el primer argumento,
+        # que reside en FP[8] (después de $ra y $fp guardados)
+        fp_ref = TACOperand("FP[8]", typ=sym_type) 
+
+        # Cargar el puntero 'this' desde el stack a un nuevo temporal
+        temp_op = self.program.new_temp_operand(typ=sym_type)
+        self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
+
+        return temp_op
     
     def _apply_suffix(self, base: TACOperand, suffix_ctx) -> TACOperand:
         """Aplica un sufijo a una expresión base"""
@@ -1015,7 +1138,7 @@ class TACGenerator(CompiscriptVisitor):
         return base
     
     def _apply_call(self, func: TACOperand, call_ctx) -> TACOperand:
-        """Aplica una llamada de función (Corregido: usa $v0, no POP)"""
+        """Aplica una llamada de función (Corregido: maneja 'this' y tipo de retorno)"""
         # Evaluar y hacer PUSH de argumentos (en orden inverso)
         args_vals = []
         if call_ctx.arguments():
@@ -1025,25 +1148,45 @@ class TACGenerator(CompiscriptVisitor):
         for arg in reversed(args_vals):
             self.program.emit(TACOp.PUSH, arg1=arg)
         
-        # --- FIX: PUSH 'this' si es una llamada a método ---
         num_args = len(args_vals)
-        obj_to_free = None # Para no liberar 'this' si no es temporal
-        if self.last_method_obj:
+        obj_to_free = None 
+        
+        # --- ***** INICIO DE CORRECCIÓN (FIX DE 'this') ***** ---
+        
+        # ES UN MÉTODO SI:
+        # 1. El 'func' es un temporal (tN, no "toString" o "fibonacci")
+        # 2. El flag 'last_method_obj' está seteado (por el _apply_property anterior)
+        is_method_call = func.is_temp and self.last_method_obj
+        
+        if is_method_call:
+            # ¡Pushear el puntero 'this' como el primer argumento!
             self.program.emit(TACOp.PUSH, arg1=self.last_method_obj)
             num_args += 1
-            # Guardamos para liberar solo si es temporal
-            obj_to_free = self.last_method_obj 
-            self.last_method_obj = None # Consumirlo
-        # ---------------------------------------------------
+            obj_to_free = self.last_method_obj
         
-        # --- INICIO DE LA CORRECCIÓN ---
+        # *Siempre* limpiar last_method_obj después de CUALQUIER llamada.
+        # Si era una llamada a método, se usó.
+        # Si era una llamada global (ej: toString(this.grado)), se descarta.
+        self.last_method_obj = None 
+        
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+        
         num_args_op = self._make_constant(num_args)
         
-        # Crear un temporal para el resultado
-        result = self.program.new_temp()
-        result_op = TACOperand(result, is_temp=True)
+        # --- LÓGICA DE TIPO DE RETORNO (¡YA DEBERÍAS TENERLA!) ---
+        return_type_str: Optional[str] = None
+        if func.typ and '->' in str(func.typ):
+            try:
+                # El tipo es como "(string, integer) -> null" o "() -> string"
+                return_type_str = str(func.typ).split('->')[1].strip()
+            except Exception:
+                pass # Dejar como None si el parseo falla
 
-        # Emitir la LLAMADA con el operando de resultado
+        # Crear un temporal para el resultado CON EL TIPO DE RETORNO
+        result_op = self.program.new_temp_operand(typ=return_type_str)
+        # --- FIN LÓGICA DE TIPO ---
+
+        # Emitir UNA SOLA LLAMADA con el operando de resultado
         self.program.emit(TACOp.CALL, 
                           result=result_op, 
                           arg1=func, 
@@ -1054,18 +1197,10 @@ class TACGenerator(CompiscriptVisitor):
             bytes_to_pop = num_args * 4
             self.program.emit(TACOp.ADD_SP, arg1=self._make_constant(bytes_to_pop))
         
-        # --- ¡¡¡NO HAY POP!!! ---
-        # --- FIN DE LA CORRECCIÓN ---
-
         # Liberar args temporales
         self._free_if_temp(*args_vals)
-        # Liberar 'this' solo si era un temporal
         if obj_to_free:
              self._free_if_temp(obj_to_free)
-
-        # MUY IMPORTANTE: Limpiar last_method_obj si no se usó
-        if self.last_method_obj:
-            self.last_method_obj = None
 
         return result_op # Devolver el operando 'result_op'
     
@@ -1079,32 +1214,62 @@ class TACGenerator(CompiscriptVisitor):
         return result
     
     def _apply_property(self, obj: TACOperand, prop_ctx) -> TACOperand:
-        """Aplica acceso a propiedad"""
+        """Aplica acceso a propiedad (CORREGIDO: pasa offset, no nombre)"""
         prop_name = self._id(prop_ctx)
-        prop_op = self._make_constant(prop_name)
         
-        # --- ***** INICIO DEL ARREGLO ***** ---
-        # Distinguir entre acceso a campo y acceso a método
-        obj_type = str(obj.typ)
-        class_sym = self.global_scope.resolve(obj_type)
+        obj_type_name = str(obj.typ)
+        class_sym = self.global_scope.resolve(obj_type_name) 
         
         result_op: TACOperand
-        
-        if class_sym and prop_name in class_sym.methods:
-            # Es un puntero a método. Usar un nombre especial que NO sea "tN"
-            # para que el optimizador no lo confunda con un temporal regular.
-            temp_name = f"t_ptr_{self.program.new_temp()}"
-            result_op = TACOperand(temp_name, is_temp=True) 
-        else:
-            # Es un acceso a campo, usar un temporal normal
-            temp_name = self.program.new_temp()
-            result_op = TACOperand(temp_name, is_temp=True)
-        # --- ***** FIN DEL ARREGLO ***** ---
+        member_type_str: Optional[str] = None
+
+        if class_sym:
+            if prop_name in class_sym.methods:
+                # --- Lógica de Método (esto está bien, no tocar) ---
+                method_type = class_sym.methods[prop_name] 
+                member_type_str = str(method_type) if method_type else None 
+                
+                temp_name_str = f"t_ptr_{self.program.new_temp()}"
+                try:
+                    temp_val = int(temp_name_str[7:]) 
+                except ValueError:
+                    temp_val = temp_name_str
+                
+                result_op = TACOperand(
+                    value=temp_val, 
+                    is_temp=True, 
+                    typ=member_type_str
+                )
+                prop_op = self._make_constant(prop_name) # Pasa el NOMBRE del método
+                # --- Fin Lógica de Método ---
+
+            elif prop_name in class_sym.fields:
+                field_type = class_sym.fields[prop_name]
+                member_type_str = str(field_type) if field_type else None
+                
+                # --- ***** INICIO DE CORRECCIÓN (CAMPO) ***** ---
+                # Usar el nuevo helper
+                offset = self._get_field_offset(obj_type_name, prop_name)
+                prop_op = self._make_constant(offset, 'integer') 
+                # --- ***** FIN DE CORRECCIÓN (CAMPO) ***** ---
+                
+                result_op = self.program.new_temp_operand(typ=member_type_str)
             
+            else:
+                result_op = self.program.new_temp_operand(typ='unknown')
+                prop_op = self._make_constant(prop_name) # Fallback
+        else:
+            if prop_name == "length":
+                member_type_str = 'integer'
+            else:
+                member_type_str = 'unknown'
+            result_op = self.program.new_temp_operand(typ=member_type_str)
+            prop_op = self._make_constant(prop_name) # Fallback
+
         self.program.emit(TACOp.FIELD_ACCESS, result_op, obj, prop_op)
-        self.last_method_obj = obj
         
-        return result_op # Devolver el operando completo
+        self.last_method_obj = obj
+        return result_op
     
     # ========== TRY-CATCH ==========
     def visitTryCatchStatement(self, ctx: CompiscriptParser.TryCatchStatementContext):

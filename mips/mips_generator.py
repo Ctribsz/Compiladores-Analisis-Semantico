@@ -61,6 +61,8 @@ class MIPSGenerator:
         self.temp_map: Dict[str, int] = {}    # Mapa de 'tK' -> offset_stack
         self.current_frame_size = 0           # Tamaño de locales (de ENTER)
         self.current_temp_offset = 0          # Offset actual para nuevos 'tK'
+        self.in_function = False # Flag para saber si estamos en _script_start o en una función
+        self.main_max_temp_offset = 0 # Offset máximo para temporales en main
         
     def _emit(self, line: str, indent: int = 1):
         """Añade una línea de MIPS al buffer."""
@@ -90,10 +92,13 @@ class MIPSGenerator:
         self.mips_code.append("\n# === SECCIÓN DE CÓDIGO ===")
         self._emit(get_text_preamble(), indent=0)
         
-        # ========== MODIFICADO: AÑADIR SALTO INICIAL ==========
         self._emit("# Inicializar frame pointer y saltar a script principal", indent=1)
         self._emit("move $fp, $sp", indent=1)
-        self._emit("subu $sp, $sp, 200  # Reservar espacio para temporales", indent=1)
+        
+        # Usar un placeholder que reemplazaremos al final
+        self._emit("subu $sp, $sp, __MAIN_FRAME_SIZE__", indent=1) 
+        # Línea original (borrar):
+        # self._emit("subu $sp, $sp, 200  # Reservar espacio para temporales", indent=1)
         self._emit("j _script_start          # Saltar sobre definiciones de funciones", indent=1)
         self._emit("", indent=0) # Línea en blanco para separar
         # ===========================================================
@@ -101,23 +106,25 @@ class MIPSGenerator:
         # 5. Traducir cada instrucción TAC
         
         # --- NUEVA LÓGICA DE ETIQUETA ---
-        in_function = False
+        # (CAMBIAR la variable local 'in_function' por 'self.in_function')
+        
+        # Línea original (borrar): in_function = False
+        self.in_function = False # Usar la propiedad de la clase
         script_start_emitted = False
         
         for inst in self.program.instructions:
             if inst.op == TACOp.FUNC_START:
-                in_function = True
+                # Línea original (borrar): in_function = True
+                self.in_function = True # Usar la propiedad de la clase
             
             # --- INSERTAR ETIQUETA ANTES DEL SCRIPT PRINCIPAL ---
-            # Si NO estamos en una función, y NO hemos puesto la etiqueta...
-            if not in_function and not script_start_emitted:
-                # Esta es la primera instrucción fuera de una función
+            if not self.in_function and not script_start_emitted:
                 self._emit("_script_start:", indent=0)
                 script_start_emitted = True
                 self._emit("# Reseteando estado de frame para main", indent=2)
                 self.temp_map = {}
-                self.current_frame_size = 0  # main no tiene 'ENTER', su frame es 0
-                self.current_temp_offset = 0 # Empezar temporales desde 0
+                self.current_frame_size = 0  
+                self.current_temp_offset = 0 
             
             # Traducir la instrucción
             self._emit(f"# {inst}", indent=1)
@@ -125,27 +132,39 @@ class MIPSGenerator:
             
             # Marcar que salimos de la función
             if inst.op == TACOp.FUNC_END:
-                in_function = False
-                self._emit("", indent=0) # Añadir espacio después de funciones
+                # Línea original (borrar): in_function = False
+                self.in_function = False # Usar la propiedad de la clase
+                self._emit("", indent=0) 
         # --- FIN LÓGICA DE ETIQUETA ---
 
         # (Fallback por si el script no tiene funciones)
         if not script_start_emitted:
              self._emit("_script_start:", indent=0)
-             # Aplicar el reset aquí también por si acaso
              self.temp_map = {}
              self.current_frame_size = 0
              self.current_temp_offset = 0
                  
         self._emit("\n# Terminar programa", indent=1)
         self._emit("jal _exit", indent=1)
-        # =========================================================
         
         # 6. Añadir helpers (syscalls) al final
         self.mips_code.append("\n# === HELPERS DEL RUNTIME ===")
         self.mips_code.append(get_syscall_helpers())
         
-        return "\n".join(self.mips_code)
+        # --- ***** INICIO DE CORRECCIÓN FINAL (Reemplazo) ***** ---
+        # Unir el código
+        final_code = "\n".join(self.mips_code)
+        
+        # Calcular el tamaño final y reemplazar el placeholder
+        # +32 bytes de "seguridad" por si acaso
+        safe_main_size = self.main_max_temp_offset + 32
+        final_code = final_code.replace("__MAIN_FRAME_SIZE__", str(safe_main_size))
+        
+        return final_code
+        # --- ***** FIN DE CORRECCIÓN FINAL ***** ---
+
+        # Línea original (borrar):
+        # return "\n".join(self.mips_code)
 
     # --- FASE 1: ESCANEO DE DATOS ---
 
@@ -267,7 +286,7 @@ class MIPSGenerator:
             self._load_op("$t1", inst.arg2)    # t1 = index
             self._emit("sll $t1, $t1, 2")      # t1 = index * 4 (word size)
             self._emit("add $t0, $t0, $t1")    # t0 = base + (index * 4)
-            self._emit("lw $t2, 0($t0)")       # t2 = Mem[t0]
+            self._emit("lw $t2, 0($t0)")      # t2 = Mem[t0]
             self._store_op("$t2", inst.result) # result = t2
         
         elif op == TACOp.ARRAY_ASSIGN: # result[arg1] = arg2 (base[index] = value)
@@ -276,85 +295,50 @@ class MIPSGenerator:
             self._load_op("$t2", inst.arg2)    # t2 = value
             self._emit("sll $t1, $t1, 2")      # t1 = index * 4
             self._emit("add $t0, $t0, $t1")    # t0 = base + (index * 4)
-            self._emit("sw $t2, 0($t0)")       # Mem[t0] = t2
+            self._emit("sw $t2, 0($t0)")      # Mem[t0] = t2
 
-        elif op == TACOp.FIELD_ACCESS: # result = arg1.arg2 (obj.field)
+        elif op == TACOp.FIELD_ACCESS: # result = arg1.arg2 (obj.prop)
             obj_op = inst.arg1
-            member_name = str(inst.arg2.value)
-
-            # --- CORRECCIÓN: Obtener tipo de clase dinámicamente ---
-            class_name = None
-            if obj_op and hasattr(obj_op, 'typ') and obj_op.typ:
-                class_name = str(obj_op.typ)
-
-            class_layout = self.class_layouts.get(class_name)
+            prop_op = inst.arg2 # ¡Este es el operando clave!
             
-            if not class_layout:
-                self._emit(f"# ERROR: No se encontró layout de clase '{class_name}' para {member_name}")
-                return # <-- ¡IMPORTANTE: Usar continue para saltar!
+            self._load_op("$t0", obj_op) # t0 = base address
             
-            if member_name in class_layout.fields:
-                # --- Es un ACCESO A CAMPO (p.x) ---
-                field_name = member_name
-                offset = 0
-                try:
-                    field_list = list(class_layout.fields.keys())
-                    offset = field_list.index(field_name) * 4
-                except:
-                    self._emit(f"# ERROR: Fallback de offset para {field_name}")
-                    offset = 0
-                
-                self._emit(f"# (Accediendo a campo '{field_name}' en offset {offset})")
-                self._load_op("$t0", obj_op) # t0 = base address
+            if prop_op.is_constant and isinstance(prop_op.value, int):
+                # --- CASO 1: Es un CAMPO. prop_op ES el offset ---
+                offset = prop_op.value
+                self._emit(f"# (Accediendo a campo en offset {offset})")
                 self._emit(f"lw $t1, {offset}($t0)") # t1 = Mem[base + offset]
                 self._store_op("$t1", inst.result) # result = t1
             
-            elif member_name in class_layout.methods:
-                # --- Es un ACCESO A MÉTODO (p.getX) ---
-                
-                # CORRECCIÓN: Encontrar la clase que define el método
+            elif prop_op.is_constant and isinstance(prop_op.value, str):
+                # --- CASO 2: Es un MÉTODO. prop_op ES el nombre ---
+                member_name = str(prop_op.value)
+                class_name = str(obj_op.typ)
                 implementation_class = self._find_method_implementation_class(class_name, member_name)
-                
                 method_label = self._sanitize_label(f"{implementation_class}.{member_name}") 
                 
                 self._emit(f"# (Resolviendo dirección de método {method_label})")
                 self._emit(f"la $t0, {method_label}")
                 self._store_op("$t0", inst.result) # result = addr(getX)
-            else:
-                self._emit(f"# ERROR: Miembro '{member_name}' no encontrado en '{class_name}'")
             
-        elif op == TACOp.FIELD_ASSIGN: # result.arg1 = arg2 (obj.field = value)
+            else:
+                self._emit(f"# ERROR: FIELD_ACCESS no sabe qué hacer con {prop_op}")    
+            
+        elif op == TACOp.FIELD_ASSIGN: # result.arg1 = arg2 (obj.prop = value)
             obj_op = inst.result
-            field_name = str(inst.arg1.value)
+            prop_op = inst.arg1 # ¡Este es el operando clave!
             value_op = inst.arg2
-
-            # --- CORRECCIÓN: Obtener tipo de clase dinámicamente ---
-            class_name = None
-            if obj_op and hasattr(obj_op, 'typ') and obj_op.typ:
-                class_name = str(obj_op.typ)
-
-            class_layout = self.class_layouts.get(class_name)
             
-            if not class_layout:
-                self._emit(f"# ERROR: No se encontró layout de clase '{class_name}' para {field_name}")
-                return 
-            
-            offset = 0
-            if field_name in class_layout.fields:
-                try:
-                    field_list = list(class_layout.fields.keys())
-                    offset = field_list.index(field_name) * 4
-                except:
-                    self._emit(f"# ERROR: Fallback de offset para {field_name}")
-                    offset = 0
+            if prop_op.is_constant and isinstance(prop_op.value, int):
+                # --- Es un CAMPO. prop_op ES el offset ---
+                offset = prop_op.value
+                self._emit(f"# (Asignando a campo en offset {offset})")
+                self._load_op("$t0", obj_op)    # t0 = base address
+                self._load_op("$t1", value_op)  # t1 = value
+                self._emit(f"sw $t1, {offset}($t0)") # Mem[base + offset] = value
             else:
-                self._emit(f"# ERROR: Campo '{field_name}' no encontrado en '{class_name}'")
-                return
-            
-            self._emit(f"# (Asignando a campo '{field_name}' en offset {offset})")
-            self._load_op("$t0", obj_op)     # t0 = base address
-            self._load_op("$t1", value_op)   # t1 = value
-            self._emit(f"sw $t1, {offset}($t0)") # Mem[base + offset] = value
+                # No deberías poder asignar a un método
+                self._emit(f"# ERROR: FIELD_ASSIGN no puede asignar a {prop_op} (no es un offset int)")
         
         # --- Control de Flujo ---
         elif op == TACOp.GOTO:
@@ -372,7 +356,6 @@ class MIPSGenerator:
         elif op == TACOp.FUNC_START:
             label = str(inst.arg1)  # Obtener nombre original
             
-            # Si es un constructor o método de clase, mantener el formato Class_method
             if "." in label:
                 parts = label.split(".")
                 label = "_".join(parts)  # Point.constructor → Point_constructor
@@ -380,98 +363,82 @@ class MIPSGenerator:
                 label = self._sanitize_label(label)
             
             self._emit(f"{label}:", indent=0)
-            # Reseteamos el mapa de temporales para esta nueva función
             self.temp_map = {}
             self.current_frame_size = 0
             self.current_temp_offset = 0
 
         elif op == TACOp.ENTER: # Prolog
             size = inst.arg1.value
-            self.current_frame_size = size # Guardamos tamaño de locales
+            self.current_frame_size = size 
             
-            # 1. Guardar $ra y $fp viejo
             self._emit("subu $sp, $sp, 8")
             self._emit("sw $ra, 4($sp)")
             self._emit("sw $fp, 0($sp)")
-            
-            # 2. $fp = $sp
             self._emit("move $fp, $sp")
             
-            # 3. Reservar espacio para locales (size)
             if size > 0:
                 self._emit(f"subu $sp, $sp, {size}")
 
-        elif op == TACOp.LEAVE: # Epilog
-            # 1. Liberar espacio de locales
+        elif op == TACOp.LEAVE:  # Epilog
+            # Restaurar stack frame
             if self.current_frame_size > 0:
                 self._emit(f"addu $sp, $sp, {self.current_frame_size}")
-            
-            # 2. Restaurar $ra y $fp
             self._emit("lw $ra, 4($sp)")
             self._emit("lw $fp, 0($sp)")
             self._emit("addu $sp, $sp, 8")
+            self._emit("jr $ra")  # Retornar al llamador
             
         elif op == TACOp.RETURN:
             if inst.arg1:
-                self._load_op("$v0", inst.arg1) # $v0 = valor de retorno
-            self._emit("jr $ra") # Saltar a dirección de retorno
+                self._load_op("$v0", inst.arg1)  # $v0 = valor de retorno
+            # El epílogo completo se emite en LEAVE
+            # Pero si hay return antes de leave, necesitamos saltar al epílogo
+            # O simplemente emitir el epílogo aquí también
+            if self.current_frame_size > 0:
+                self._emit(f"addu $sp, $sp, {self.current_frame_size}")
+            self._emit("lw $ra, 4($sp)")
+            self._emit("lw $fp, 0($sp)")
+            self._emit("addu $sp, $sp, 8")
+            self._emit("jr $ra")
 
         # --- Llamadas ---
         elif op == TACOp.PUSH: # Poner en el stack
             self._load_op("$t0", inst.arg1)
             self._emit("subu $sp, $sp, 4")
             self._emit("sw $t0, 0($sp)")
-            
+
         elif op == TACOp.CALL:
             op_operand = inst.arg1
-            op_name = str(op_operand) # "toString", "t_ptr_t3", "fibonacci"
+            op_name = str(op_operand) # "toString", "t24", "fibonacci"
             
             # --- HACK: Interceptar toString ---
             if "toString" in op_name:
                 self._emit("# Interceptando llamada a toString -> _int_to_string")
-                
-                # --- ***** INICIO DE LA CORRECCIÓN ***** ---
-                # Determinar dónde está el entero a convertir
-                num_args_op = inst.arg2
-                num_args = 0
-                if num_args_op and num_args_op.is_constant:
-                    num_args = num_args_op.value
-                
-                if num_args == 2:
-                    # Es una llamada con 'this' (ej: en incrementarEdad)
-                    # El entero está en 4($sp), 'this' está en 0($sp)
-                    self._emit("lw $a0, 4($sp)") 
-                else:
-                    # Es una llamada global (ej: toString(i))
-                    # El entero está en 0($sp)
-                    self._emit("lw $a0, 0($sp)")
-                # --- ***** FIN DE LA CORRECCIÓN ***** ---
-                
+                self._emit("lw $a0, 0($sp)") # Cargar el entero desde el stack
                 self._emit("jal _int_to_string")
                 
-                # 'toString' es un caso especial, guardamos su resultado aquí
+                # Guardar el resultado de toString si es necesario
                 if inst.result:
                     self._store_op("$v0", inst.result)
             
-            # --- Llamada a Método (Indirecta) ---
-            elif op_operand.is_temp and "t_ptr_" in op_name:
-                # Es un puntero a método: TACOperand(value="t_ptr_t4", ...)
-                # Cargar de memoria y usar JALR.
-                self._emit(f"# Llamada indirecta a puntero '{op_name}'")
-                self._load_op("$t0", op_operand)
-                self._emit("jalr $t0")
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
             
-            # --- Llamada a Función (Directa) ---
+            # SI el operando es un temporal (tN), es una llamada INDIRECTA
+            # (el temporal CONTIENE la dirección de la función)
+            elif op_operand.is_temp:
+                self._emit(f"# Llamada indirecta a puntero en temporal '{op_name}'")
+                self._load_op("$t0", op_operand) # Cargar la dirección desde el stack a $t0
+                self._emit("jalr $t0")          # Jump And Link Register
+            
+            # SI NO es temporal, es una etiqueta (llamada DIRECTA)
             else:
-                # Es una función normal (ej: "fibonacci") o un temporal 
-                # renombrado (ej: "t1")
+                # Es una función normal (ej: "fibonacci", "Persona_constructor")
                 label = self._sanitize_label(op_name)
                 self._emit(f"jal {label}")
+            
+            # --- ***** FIN DE CORRECCIÓN ***** ---
 
-            # --- ***** INICIO DE LA CORRECCIÓN ***** ---
-            # Para TODAS las llamadas que NO sean 'toString',
-            # si tienen un 'result' (ej: t1 = call fibonacci),
-            # guardar el valor de $v0 en ese temporal.
+            # Guardar el valor de retorno (excepto para toString, que se maneja arriba)
             if "toString" not in op_name and inst.result:
                 self._store_op("$v0", inst.result)
             
@@ -497,7 +464,6 @@ class MIPSGenerator:
             elif op_type == 'boolean':
                 self._emit("jal _print_boolean")
             else:
-                # Asumir integer, null, o array (que imprime su dirección)
                 self._emit("jal _print_int")
         
         elif op == TACOp.NEW:
@@ -519,7 +485,7 @@ class MIPSGenerator:
                     size = len(fields) * 4
                 
                 if size == 0 and class_name == "Point":
-                     size = 8 # HACK: Fallback
+                        size = 8 # HACK: Fallback
 
                 self._emit(f"# Alocando {size} bytes para {class_name}")
                 self._emit(f"li $a0, {size}")
@@ -540,11 +506,10 @@ class MIPSGenerator:
         self._emit(f"{mips_op} $t2, $t0, $t1")
         self._store_op("$t2", inst.result)
 
-    def _get_temp_offset(self, op_name: str) -> int:
+    def _get_temp_offset(self, op_name: str) -> int:    
         """
         Obtiene el offset del stack para un temporal 'tK'.
-        Si no existe, crea uno nuevo.
-        Los offsets son *negativos* desde $fp (después de locales).
+        ...
         """
         if op_name not in self.temp_map:
             # + 4 bytes por temporal
@@ -552,7 +517,15 @@ class MIPSGenerator:
             # Mapea 'tK' al offset total (locales + este temp)
             self.temp_map[op_name] = self.current_frame_size + self.current_temp_offset
         
-        return self.temp_map[op_name]
+        current_offset = self.temp_map[op_name]
+
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # Rastrear el offset máximo usado en main
+        if not self.in_function: # Si estamos en main (_script_start)
+            self.main_max_temp_offset = max(self.main_max_temp_offset, current_offset)
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+        
+        return current_offset   
 
     def _load_op(self, reg: str, op: TACOperand):
         """
@@ -569,9 +542,13 @@ class MIPSGenerator:
         op_name = str(op) # <-- FIX: Usar str(op) como el nombre/llave
 
         if op.is_constant:
-            if isinstance(op.value, str):
+            if op.value is None:
+                # Cargar 'null'
+                self._emit(f"li {reg}, 0")
+            elif isinstance(op.value, str):
                 # Cargar dirección de string
-                self._emit(f"la {reg}, {self.strings[op.value]}")
+                label = self.strings[op.value]
+                self._emit(f"la {reg}, {label}")
             else:
                 # Cargar valor inmediato (int, bool)
                 val = 1 if op.value is True else (0 if op.value is False else op.value)

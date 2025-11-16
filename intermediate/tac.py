@@ -210,6 +210,18 @@ class TACProgram:
         # mantén temp_counter como “máximo creado” para reportes
         self.temp_counter = max(self.temp_counter, int(t[1:]))
         return t
+    
+    def new_temp_operand(self, typ: Optional[str] = None) -> TACOperand:
+        """Crea un nuevo operando temporal con tipo"""
+        temp_name_str = self.new_temp() # "t5"
+        # Extraer el número para el 'value' del operando
+        try:
+            temp_val = int(temp_name_str[1:]) # 5
+        except ValueError:
+            temp_val = temp_name_str # Fallback (no debería pasar con new_temp)
+            
+        return TACOperand(value=temp_val, is_temp=True, typ=typ)
+    
     def to_string(self, numbered: bool = False) -> str:
         lines = []
         for i, inst in enumerate(self.instructions):

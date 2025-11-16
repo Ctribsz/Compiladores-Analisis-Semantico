@@ -217,7 +217,7 @@ _int_to_string:
     li $v0, 9         # sbrk
     syscall
     move $s1, $v0     # $s1 = inicio del buffer
-    add $t0, $s1, 0   # $t0 = cursor del buffer
+    move $t0, $s1     # <--- ¡ESTA ES LA LÍNEA CORREGIDA!
 
     # 2. Manejar caso especial 0
     bne $s0, $zero, _its_check_sign
