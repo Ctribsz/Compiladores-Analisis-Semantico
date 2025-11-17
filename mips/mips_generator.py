@@ -201,7 +201,7 @@ class MIPSGenerator:
         self._emit("\n# Literales de String", indent=1)
         for s, label in self.strings.items():
             # Escapar saltos de línea y comillas en MIPS
-            escaped_s = s.replace("\\", "\\\\").replace("\n", "\\n").replace("\"", "\\\"")
+            escaped_s = s.replace("\"", "\\\"")
             self._emit(f"{label}: .asciiz \"{escaped_s}\"", indent=1)
 
     # --- FASE 3: TRADUCCIÓN DE INSTRUCCIONES ---

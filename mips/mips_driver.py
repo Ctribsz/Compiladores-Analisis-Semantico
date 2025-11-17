@@ -105,7 +105,7 @@ def main():
         if args.verbose:
             print("✓ Fase 1: Análisis sintáctico completado")
         
-        # --- FASE 2: ANÁLISIS SEMÁNTICO Y GEN. TAC (Igual) ---
+        # --- FASE 2: ANÁLISIS SEMÁNTICO Y GEN. TAC  ---
         result = generate_intermediate_code(tree)
         
         if result.has_errors:
@@ -118,7 +118,7 @@ def main():
         if args.verbose:
             print(f"✓ Fase 2: Semántica y Gen. TAC completada ({len(result.tac_program.instructions)} inst.)")
 
-        # --- FASE 2.5: OPTIMIZACIÓN DE TAC (NUEVO) ---
+        # --- FASE 2.5: OPTIMIZACIÓN DE TAC ---
         tac_program = result.tac_program
         if not args.no_optimize:
             if args.verbose:
@@ -133,14 +133,14 @@ def main():
             if args.verbose:
                 print("Saltando Fase 2.5: Optimización de TAC")
         
-        # (Debug) Guardar TAC optimizado si se pidió
+        #  Guardar TAC optimizado 
         if args.optimized_tac_out:
             opt_out_path = Path(args.optimized_tac_out)
             opt_out_path.write_text(tac_program.to_string(), encoding='utf-8')
             if args.verbose:
                 print(f"  (Debug) TAC optimizado guardado en: {opt_out_path}")
 
-        # --- FASE 3: GENERACIÓN DE CÓDIGO MIPS (NUEVO) ---
+        # --- FASE 3: GENERACIÓN DE CÓDIGO MIPS  ---
         if args.verbose:
             print("Iniciando Fase 3: Generación de código MIPS...")
         
