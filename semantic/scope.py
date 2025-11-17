@@ -31,7 +31,8 @@ def serialize_symbol(sym: Symbol) -> Dict[str, Any]:
     d: Dict[str, Any] = {
         "name": getattr(sym, "name", None),
         "kind": sym.__class__.__name__,
-        "type": _type_str(getattr(sym, "typ", None)),  # <-- usa .typ
+        "type": _type_str(getattr(sym, "typ", None)),
+        "offset": getattr(sym, "offset", None),  # ← NUEVO
     }
 
     if isinstance(sym, VariableSymbol):
@@ -39,15 +40,26 @@ def serialize_symbol(sym: Symbol) -> Dict[str, Any]:
         d["initialized"] = getattr(sym, "initialized", False)
 
     if isinstance(sym, FunctionSymbol):
+        d["label"] = getattr(sym, "label", None)  # ← NUEVO
         d["params"] = [
-            {"name": getattr(p, "name", None), "type": _type_str(getattr(p, "typ", None))}
+            {
+                "name": getattr(p, "name", None), 
+                "type": _type_str(getattr(p, "typ", None)),
+                "offset": getattr(p, "offset", None)  # ← NUEVO
+            }
             for p in (getattr(sym, "params", []) or [])
         ]
         ftype = getattr(sym, "typ", None)
         if isinstance(ftype, FunctionType):
             d["return_type"] = _type_str(ftype.ret)
+        
+        # ← NUEVO: Información del registro de activación
+        d["params_size"] = getattr(sym, "params_size", 0)
+        d["locals_size"] = getattr(sym, "locals_size", 0)
+        d["frame_size"] = getattr(sym, "frame_size", 0)
 
     if isinstance(sym, ClassSymbol):
+        d["instance_size"] = getattr(sym, "instance_size", 0)  # ← NUEVO
         fields = getattr(sym, "fields", {}) or {}
         d["fields"] = [
             {"name": fname, "kind": "Field", "type": _type_str(ftype)}
@@ -61,6 +73,7 @@ def serialize_symbol(sym: Symbol) -> Dict[str, Any]:
                 item["params"] = [_type_str(t) for t in (mtype.params or [])]
                 item["return_type"] = _type_str(mtype.ret)
             d["methods"].append(item)
+    
     return d
 
 def serialize_scope(scope: "Scope") -> Dict[str, Any]:

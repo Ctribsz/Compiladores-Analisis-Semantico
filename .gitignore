@@ -2,5 +2,6 @@ configs
 program/__pycache__
 program/gen/
 semantic/__pycache__
-venv/
+venv
+ide/__pycache__
 __pycache__/

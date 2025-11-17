@@ -12,6 +12,8 @@ let z: integer = add(1, 2);
 
 // Prueba un error:
 // if (x) { }  // <- cond no booleana
+
+// Prueba TAC: activa la casilla TAC y analiza
 `;
 
   editor = monaco.editor.create(document.getElementById('editor'), {
@@ -76,7 +78,7 @@ function wireUI() {
     }
   });
 
-  // Tabs (Errores / Símbolos)
+  // Tabs (Errores / Símbolos / TAC)
   for (const el of document.querySelectorAll('.tab')) {
     el.addEventListener('click', () => activateTab(el.dataset.tab));
   }
@@ -91,6 +93,29 @@ function wireUI() {
 
   // Splitter
   initSplitter();
+  
+  // Guardar preferencias de TAC
+  const tacCheckbox = $('generateTAC');
+  const optCheckbox = $('optimizeTAC');
+  
+  if (tacCheckbox) {
+    tacCheckbox.checked = localStorage.getItem('generateTAC') === 'true';
+    tacCheckbox.addEventListener('change', () => {
+      localStorage.setItem('generateTAC', tacCheckbox.checked);
+    });
+  }
+  
+  if (optCheckbox) {
+    optCheckbox.checked = localStorage.getItem('optimizeTAC') === 'true';
+    optCheckbox.addEventListener('change', () => {
+      localStorage.setItem('optimizeTAC', optCheckbox.checked);
+      // Optimizar solo tiene sentido si TAC está activado
+      if (optCheckbox.checked && tacCheckbox && !tacCheckbox.checked) {
+        tacCheckbox.checked = true;
+        localStorage.setItem('generateTAC', 'true');
+      }
+    });
+  }
 }
 
 function activateTab(name) {
@@ -99,6 +124,7 @@ function activateTab(name) {
   }
   $('errors').style.display = (name === 'errors') ? 'block' : 'none';
   $('symbols').style.display = (name === 'symbols') ? 'block' : 'none';
+  $('tac').style.display = (name === 'tac') ? 'block' : 'none';
 }
 
 function setTheme(mode) {
@@ -108,7 +134,6 @@ function setTheme(mode) {
 }
 
 function updateThemeButtonText(mode) {
-  // Mostrar el nombre del modo actual en el botón (Claro/Oscuro)
   const btn = $('themeToggle');
   if (!btn) return;
   btn.textContent = (mode === 'dark') ? '☀️ Claro' : '🌑 Oscuro';
@@ -131,6 +156,8 @@ function toast(text, kind='ok') {
 // ===============================
 async function analyze() {
   const source = editor.getValue();
+  const generateTAC = $('generateTAC')?.checked || false;
+  const optimizeTAC = $('optimizeTAC')?.checked || false;
 
   setStatus('Analizando…');
   let res;
@@ -138,11 +165,20 @@ async function analyze() {
     const r = await fetch('/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source })
+      body: JSON.stringify({ 
+        source,
+        generate_tac: generateTAC,
+        optimize_tac: optimizeTAC
+      })
     });
     res = await r.json();
   } catch (e) {
-    res = { ok:false, errors:[{ code:'NET', message:String(e), line:1, column:1 }], symbols: null };
+    res = { 
+      ok: false, 
+      errors: [{ code:'NET', message:String(e), line:1, column:1 }], 
+      symbols: null,
+      tac: null
+    };
   }
 
   // Limpiar markers
@@ -153,6 +189,17 @@ async function analyze() {
 
   if (res.ok) {
     panel.innerHTML = `<div class="msg-ok">✔ Sin errores</div>`;
+    
+    // Si se generó TAC, mostrar estadísticas
+    if (res.tac && res.tac.stats) {
+      const stats = res.tac.stats;
+      panel.innerHTML += `
+        <div style="margin-top: 12px; padding: 8px; background: var(--chip); border-radius: 8px;">
+          <strong>TAC generado:</strong><br/>
+          ${stats.instructions} instrucciones, ${stats.temporals} temporales, ${stats.labels} etiquetas
+        </div>
+      `;
+    }
   } else {
     // Mostrar lista y markers
     const markers = [];
@@ -191,15 +238,69 @@ async function analyze() {
 
   // Tabla de símbolos
   renderSymbols(res.symbols);
+  
+  // Código TAC
+  renderTAC(res.tac);
 
   // Cambiar a la pestaña adecuada
-  if (count > 0) activateTab('errors'); else activateTab('symbols');
+  if (count > 0) {
+    activateTab('errors');
+  } else if (res.tac) {
+    activateTab('tac');
+  } else {
+    activateTab('symbols');
+  }
 
   setStatus('Listo', count ? 'warn' : 'ok');
 }
 
 // ===============================
-// Symbols render
+// TAC render
+// ===============================
+function renderTAC(tacData) {
+  const el = $('tac');
+  if (!el) return;
+  
+  el.innerHTML = '';
+  
+  if (!tacData || !tacData.code) {
+    el.innerHTML = '<div class="muted">Código TAC no generado. Active la casilla TAC y analice.</div>';
+    return;
+  }
+  
+  // Estadísticas
+  if (tacData.stats) {
+    const stats = tacData.stats;
+    const statsDiv = document.createElement('div');
+    statsDiv.className = 'tac-stats';
+    statsDiv.innerHTML = `
+      <span>📊 Instrucciones: <strong>${stats.instructions}</strong></span>
+      <span>🔢 Temporales: <strong>${stats.temporals}</strong></span>
+      <span>🏷️ Etiquetas: <strong>${stats.labels}</strong></span>
+    `;
+    el.appendChild(statsDiv);
+  }
+  
+  // Código TAC
+  const codeDiv = document.createElement('div');
+  codeDiv.className = 'tac-code';
+  codeDiv.textContent = tacData.code.join('\n');
+  el.appendChild(codeDiv);
+  
+  // Botón para copiar
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn';
+  copyBtn.style.marginTop = '8px';
+  copyBtn.textContent = '📋 Copiar TAC';
+  copyBtn.onclick = () => {
+    navigator.clipboard.writeText(tacData.code.join('\n'));
+    toast('TAC copiado al portapapeles', 'ok');
+  };
+  el.appendChild(copyBtn);
+}
+
+// ===============================
+// Symbols render (mantenemos el original)
 // ===============================
 function escapeHtml(t) {
   return String(t ?? '').replace(/[&<>"']/g, s => (
@@ -211,20 +312,54 @@ function renderSymbol(s) {
   const kind = `<span class="sym-kind">${escapeHtml(s?.kind || '')}</span>`;
   const name = `<span class="sym-name">${escapeHtml(s?.name || '(anon)')}</span>`;
 
-  // Para funciones (top-level): params con nombre y tipo
+  // Construir parámetros CON OFFSETS
   const params = (Array.isArray(s?.params) && s.params.length)
-    ? '(' + s.params.map(p =>
-        `${escapeHtml(p?.name || '')}: <span class="sym-type">${escapeHtml(p?.type || '')}</span>`
-      ).join(', ') + ')'
+    ? '(' + s.params.map(p => {
+        let pstr = `${escapeHtml(p?.name || '')}: <span class="sym-type">${escapeHtml(p?.type || '')}</span>`;
+        // Mostrar offset del parámetro
+        if (p?.offset !== null && p?.offset !== undefined) {
+          pstr += ` <span style="color: #f6c85f; font-size: 10px;">[offset=${p.offset}]</span>`;
+        }
+        return pstr;
+      }).join(', ') + ')'
     : '';
 
   const type = (s?.return_type)
     ? `: <span class="sym-type">${escapeHtml(s.return_type)}</span>`
     : (s?.type ? `: <span class="sym-type">${escapeHtml(s.type)}</span>` : '');
 
-  let html = `<li>${kind} <code class="inline">${name}${params}${type}</code></li>`;
+  let html = `<li>${kind} <code class="inline">${name}${params}${type}`;
 
-  // ---- Campos de clase ----
+  // OFFSET para variables
+  if (s?.offset !== null && s?.offset !== undefined) {
+    html += ` <span style="color: #4cc9f0; font-size: 10px; font-weight: bold;">[offset=${s.offset}]</span>`;
+  }
+
+  // LABEL para funciones
+  if (s?.label) {
+    html += ` <span style="color: #00e5a8; font-size: 10px; font-weight: bold;">[${escapeHtml(s.label)}]</span>`;
+  }
+
+  html += `</code>`;
+
+  // REGISTRO DE ACTIVACIÓN para funciones
+  // Los campos están directamente en 's', no en 's.activation_record'
+  if (s?.frame_size !== null && s?.frame_size !== undefined && s?.frame_size > 0) {
+    html += `<br/><span style="margin-left: 20px; font-size: 11px; color: var(--muted);">`;
+    html += `📦 Frame: ${s.frame_size}B (params: ${s.params_size || 0}B, locals: ${s.locals_size || 0}B)`;
+    html += `</span>`;
+  }
+
+  // TAMAÑO DE INSTANCIA para clases
+  if (s?.instance_size !== null && s?.instance_size !== undefined && s?.instance_size > 0) {
+    html += `<br/><span style="margin-left: 20px; font-size: 11px; color: var(--muted);">`;
+    html += `📏 Instance: ${s.instance_size} bytes`;
+    html += `</span>`;
+  }
+
+  html += `</li>`;
+
+  // Fields
   if (Array.isArray(s?.fields) && s.fields.length) {
     html += `<ul class="sym-list nested">` +
       s.fields.map(f =>
@@ -235,11 +370,10 @@ function renderSymbol(s) {
       `</ul>`;
   }
 
-  // ---- Métodos de clase ----
+  // Methods
   if (Array.isArray(s?.methods) && s.methods.length) {
     html += `<ul class="sym-list nested">` +
       s.methods.map(m => {
-        // En clases serializamos params como lista de strings (tipos)
         const sig = (Array.isArray(m?.params) && m.params.length)
           ? '(' + m.params.map(t => escapeHtml(t)).join(', ') + ')'
           : '()';
@@ -275,9 +409,27 @@ function renderSymbols(root) {
     el.innerHTML = '<div class="muted">Sin tabla de símbolos disponible.</div>';
     return;
   }
+  
+  // DEBUG: Ver qué datos llegan
+  console.log("=== DATOS RECIBIDOS ===");
+  console.log("Root completo:", root);
+  if (root.symbols) {
+    root.symbols.forEach(s => {
+      console.log(`\nSímbolo: ${s.name} (${s.kind})`);
+      console.log("  offset:", s.offset);
+      console.log("  label:", s.label);
+      console.log("  activation_record:", s.activation_record);
+      if (s.params) {
+        s.params.forEach(p => {
+          console.log(`  param ${p.name}: offset=${p.offset}`);
+        });
+      }
+    });
+  }
+  console.log("=======================");
+  
   el.innerHTML = renderScope(root);
 }
-
 
 // ===============================
 // Splitter (redimensionar panel lateral)
@@ -294,7 +446,7 @@ function initSplitter() {
     if (!dragging) return;
     const rect = workspace.getBoundingClientRect();
     const relX = e.clientX - rect.left;
-    const minLeft = 380, maxLeft = rect.width - 320; // límites para editor
+    const minLeft = 380, maxLeft = rect.width - 320;
     const left = Math.max(minLeft, Math.min(maxLeft, relX));
     const rightCol = rect.width - left;
     workspace.style.gridTemplateColumns = `${left}px 6px ${rightCol}px`;

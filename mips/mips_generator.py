@@ -1,0 +1,668 @@
+"""
+Generador de Código MIPS (Fase 3)
+Traduce un TACProgram (optimizado) a código MIPS.
+"""
+import sys
+from typing import List, Dict, Set
+
+# Asegurar que podamos importar desde carpetas hermanas
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from intermediate.tac import TACProgram, TACInstruction, TACOp, TACOperand
+from mips.runtime import get_data_preamble, get_text_preamble, get_syscall_helpers
+from semantic.scope import Scope
+from semantic.symbols import ClassSymbol, FunctionSymbol 
+
+def _is_const(x) -> bool:
+    return getattr(x, "is_constant", False)
+
+def _const_val(x):
+    return getattr(x, "value", x)
+
+def _is_temp_name(x_val) -> bool:
+    """
+    Chequea si un operando (o su string) es un temporal.
+    La regla simple: si empieza con 't' y no es 'true' o 'this'.
+    """
+    s = str(x_val)
+    return s.startswith("t") and s not in ("true", "this")
+
+
+class MIPSGenerator:
+    """
+    Toma un TACProgram y genera un string de código MIPS.
+    
+    Estrategia de manejo de memoria:
+    - Variables Globales (0x...): Viven en la sección .data.
+    - Parámetros (FP[neg_offset]): Viven en el stack, accedidos por $fp.
+    - Variables Locales (ENTER size): Viven en el stack, accedidos por $fp.
+    - Temporales (tK): Se alocan dinámicamente en el stack por esta clase.
+    """
+    
+    def __init__(self, program: TACProgram, global_scope: Scope, scopes_by_ctx: dict):
+        self.program = program
+        self.global_scope = global_scope
+        self.scopes_by_ctx = scopes_by_ctx 
+        self.mips_code: List[str] = []
+        
+        # --- Estado de Generación ---
+        
+        # .data
+        self.globals: Set[str] = set()        # Set de '0x...'
+        self.strings: Dict[str, str] = {}     # Mapa de 'string' -> 'label'
+
+        # --- Mapa de Clases ---
+        self.class_layouts: Dict[str, ClassSymbol] = {}
+        
+        # .text (estado por función)
+        self.temp_map: Dict[str, int] = {}    # Mapa de 'tK' -> offset_stack
+        self.current_frame_size = 0           # Tamaño de locales (de ENTER)
+        self.current_temp_offset = 0          # Offset actual para nuevos 'tK'
+        self.in_function = False # Flag para saber si estamos en _script_start o en una función
+        self.main_max_temp_offset = 0 # Offset máximo para temporales en main
+        
+    def _emit(self, line: str, indent: int = 1):
+        """Añade una línea de MIPS al buffer."""
+        self.mips_code.append(f"{'    ' * indent}{line}")
+    
+    def _collect_class_layouts(self):
+        """ Extrae layouts de clases del scope global para acceso rápido. """
+        if not self.global_scope:
+            return
+        for name, symbol in self.global_scope.symbols.items():
+            if isinstance(symbol, ClassSymbol):
+                self.class_layouts[name] = symbol
+
+    def generate(self) -> str:
+        """Punto de entrada principal. Orquesta la generación."""
+        # 1. Recolectar info de clases
+        self._collect_class_layouts()
+        
+        # 2. Escanear el TAC para encontrar data (globales y strings)
+        self._scan_for_data()
+        
+        # 3. Generar sección .data
+        self.mips_code.append("# === SECCIÓN DE DATOS ===")
+        self._build_data_section()
+        
+        # 4. Generar sección .text
+        self.mips_code.append("\n# === SECCIÓN DE CÓDIGO ===")
+        self._emit(get_text_preamble(), indent=0)
+        
+        self._emit("# Inicializar frame pointer y saltar a script principal", indent=1)
+        self._emit("move $fp, $sp", indent=1)
+        
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # Extraer el tamaño de locales de main que calculó el SymbolCollector
+        main_locals_size = getattr(self.global_scope, "main_locals_size", 0)
+        if main_locals_size > 0:
+            self._emit(f"# (Reservando {main_locals_size} bytes para locales de main)", indent=2)
+        
+        # El 'current_frame_size' para main ES este tamaño.
+        # Los temporales se alocarán *después* de este espacio.
+        self.current_frame_size = main_locals_size
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+        
+        # Usar un placeholder que reemplazaremos al final
+        self._emit("subu $sp, $sp, __MAIN_FRAME_SIZE__", indent=1) 
+        self._emit("j _script_start          # Saltar sobre definiciones de funciones", indent=1)
+        self._emit("", indent=0) # Línea en blanco para separar
+        
+        # 5. Traducir cada instrucción TAC
+        self.in_function = False
+        script_start_emitted = False
+        
+        for inst in self.program.instructions:
+            if inst.op == TACOp.FUNC_START:
+                self.in_function = True
+            
+            if not self.in_function and not script_start_emitted:
+                self._emit("_script_start:", indent=0)
+                script_start_emitted = True
+                self._emit("# Reseteando estado de frame para main", indent=2)
+                self.temp_map = {}
+                # --- ***** INICIO DE CORRECCIÓN ***** ---
+                # Usar el tamaño de locales de main que ya guardamos
+                self.current_frame_size = getattr(self.global_scope, "main_locals_size", 0)
+                # --- ***** FIN DE CORRECCIÓN ***** ---
+                self.current_temp_offset = 0 
+            
+            self._emit(f"# {inst}", indent=1)
+            self._translate_instruction(inst)
+            
+            if inst.op == TACOp.FUNC_END:
+                self.in_function = False
+                self._emit("", indent=0) 
+
+        if not script_start_emitted:
+             self._emit("_script_start:", indent=0)
+             self.temp_map = {}
+             # --- ***** INICIO DE CORRECCIÓN ***** ---
+             self.current_frame_size = getattr(self.global_scope, "main_locals_size", 0)
+             # --- ***** FIN DE CORRECCIÓN ***** ---
+             self.current_temp_offset = 0
+                 
+        self._emit("\n# Terminar programa", indent=1)
+        self._emit("jal _exit", indent=1)
+        
+        # 6. Añadir helpers (syscalls) al final
+        self.mips_code.append("\n# === HELPERS DEL RUNTIME ===")
+        self.mips_code.append(get_syscall_helpers())
+        
+        # --- ***** INICIO DE CORRECCIÓN FINAL (Reemplazo) ***** ---
+        final_code = "\n".join(self.mips_code)
+        
+        # El tamaño total es: locales_de_main + max_temporales_de_main
+        main_locals_size = getattr(self.global_scope, "main_locals_size", 0)
+        total_main_frame_size = main_locals_size + self.main_max_temp_offset + 32
+        
+        final_code = final_code.replace("__MAIN_FRAME_SIZE__", str(total_main_frame_size))
+        
+        return final_code
+        # --- ***** FIN DE CORRECCIÓN FINAL ***** ---
+
+    # --- FASE 1: ESCANEO DE DATOS ---
+
+    def _scan_for_data(self):
+        """
+        Primera pasada: recolecta globales (0x...) y strings
+        para construir la sección .data.
+        """
+        for inst in self.program.instructions:
+            # Buscar strings en operandos (arg1 y arg2)
+            for op in [inst.arg1, inst.arg2]:
+                # Verificación robusta: debe ser TACOperand o tener atributo is_constant
+                if op and hasattr(op, 'is_constant') and op.is_constant and hasattr(op, 'value') and isinstance(op.value, str):
+                    if op.value not in self.strings:
+                        label = f"_str_{len(self.strings)}"
+                        self.strings[op.value] = label
+            
+            # Buscar globales (0x...) en result, arg1, arg2
+            for op in [inst.result, inst.arg1, inst.arg2]:
+                # Verificación robusta para evitar crashes con strings puros
+                if op and hasattr(op, 'value') and isinstance(op.value, str) and op.value.startswith("0x"):
+                    self.globals.add(op.value)
+
+    # --- FASE 2: CONSTRUCCIÓN DE .DATA ---
+
+    def _build_data_section(self):
+        """Emite el código .data."""
+        self._emit(get_data_preamble(), indent=0)
+        
+        # Globales (basado en el TAC de ejemplo, son .word)
+        self._emit("# Variables Globales (0x...)", indent=1)
+        for g in sorted(list(self.globals)):
+            self._emit(f"global_{g[2:]}: .word 0", indent=1) # ej: global_1000: .word 0
+        
+        # String literals
+        self._emit("\n# Literales de String", indent=1)
+        for s, label in self.strings.items():
+            # Escapar saltos de línea y comillas en MIPS
+            escaped_s = s.replace("\"", "\\\"")
+            self._emit(f"{label}: .asciiz \"{escaped_s}\"", indent=1)
+
+    # --- FASE 3: TRADUCCIÓN DE INSTRUCCIONES ---
+
+    def _translate_instruction(self, inst: TACInstruction):
+        """Despachador principal de traducción de TACOp a MIPS."""
+        
+        op = inst.op
+        
+        # --- Aritméticas ---
+        if op == TACOp.ADD:
+            # HACK: Verificar si es concatenación de strings
+            is_str_op = False
+            # Verificar tipo en arg1
+            if inst.arg1 and hasattr(inst.arg1, 'typ') and str(inst.arg1.typ) == 'string':
+                is_str_op = True
+            # O verificar tipo en arg2
+            elif inst.arg2 and hasattr(inst.arg2, 'typ') and str(inst.arg2.typ) == 'string':
+                is_str_op = True
+            
+            if is_str_op:
+                self._emit("# Concatenación de strings detectada")
+                self._load_op("$a0", inst.arg1)  # Cargar str1 en argumento 1
+                self._load_op("$a1", inst.arg2)  # Cargar str2 en argumento 2
+                self._emit("jal _string_concat") # Llamar a la función del runtime
+                self._store_op("$v0", inst.result) # Guardar resultado
+            else:
+                # Suma normal de enteros
+                self._translate_binary_op(inst, "add")
+
+        elif op == TACOp.SUB:
+            self._translate_binary_op(inst, "sub")
+        elif op == TACOp.MUL:
+            self._translate_binary_op(inst, "mul")
+        elif op == TACOp.DIV:
+            self._translate_binary_op(inst, "div")
+        elif op == TACOp.MOD:
+            self._translate_binary_op(inst, "rem")
+        elif op == TACOp.NEG:
+            self._load_op("$t0", inst.arg1)
+            self._emit("neg $t0, $t0")
+            self._store_op("$t0", inst.result)
+            
+        # --- Relacionales ---
+        elif op == TACOp.LT:
+            self._translate_binary_op(inst, "slt") # Set if Less Than
+        elif op == TACOp.LE:
+            self._translate_binary_op(inst, "sle") # Set if Less/Equal
+        elif op == TACOp.GT:
+            self._translate_binary_op(inst, "sgt") # Set if Greater Than
+        elif op == TACOp.GE:
+            self._translate_binary_op(inst, "sge") # Set if Greater/Equal
+        elif op == TACOp.EQ:
+            self._translate_binary_op(inst, "seq") # Set if Equal
+        elif op == TACOp.NE:
+            self._translate_binary_op(inst, "sne") # Set if Not Equal
+        
+        # --- Lógicas (simplificadas, asumen 0/1) ---
+        elif op == TACOp.AND:
+            self._translate_binary_op(inst, "and")
+        elif op == TACOp.OR:
+            self._translate_binary_op(inst, "or")
+        elif op == TACOp.NOT:
+            self._load_op("$t0", inst.arg1)
+            self._emit("seq $t0, $t0, $zero") # t0 = (t0 == 0)
+            self._store_op("$t0", inst.result)
+
+        # --- Asignación y Memoria ---
+        elif op == TACOp.ASSIGN:
+            self._load_op("$t0", inst.arg1)
+            self._store_op("$t0", inst.result)
+        
+        elif op == TACOp.DEREF: # t1 = @0x1000  o  t1 = @FP[-4]
+            self._get_addr("$t0", inst.arg1) # t0 = dirección (0x1000 o FP-4)
+            self._emit(f"lw $t1, 0($t0)")    # t1 = Mem[t0]
+            self._store_op("$t1", inst.result) # t1 (stack) = t1
+
+        elif op == TACOp.ARRAY_ACCESS: # result = arg1[arg2] (base[index])
+            self._load_op("$t0", inst.arg1)    # t0 = base address
+            self._load_op("$t1", inst.arg2)    # t1 = index
+            self._emit("sll $t1, $t1, 2")      # t1 = index * 4 (word size)
+            self._emit("add $t0, $t0, $t1")    # t0 = base + (index * 4)
+            self._emit("lw $t2, 0($t0)")      # t2 = Mem[t0]
+            self._store_op("$t2", inst.result) # result = t2
+        
+        elif op == TACOp.ARRAY_ASSIGN: # result[arg1] = arg2 (base[index] = value)
+            self._load_op("$t0", inst.result)  # t0 = base address
+            self._load_op("$t1", inst.arg1)    # t1 = index
+            self._load_op("$t2", inst.arg2)    # t2 = value
+            self._emit("sll $t1, $t1, 2")      # t1 = index * 4
+            self._emit("add $t0, $t0, $t1")    # t0 = base + (index * 4)
+            self._emit("sw $t2, 0($t0)")      # Mem[t0] = t2
+
+        elif op == TACOp.FIELD_ACCESS: # result = arg1.arg2 (obj.prop)
+            obj_op = inst.arg1
+            prop_op = inst.arg2 # ¡Este es el operando clave!
+            
+            self._load_op("$t0", obj_op) # t0 = base address
+            
+            if prop_op.is_constant and isinstance(prop_op.value, int):
+                # --- CASO 1: Es un CAMPO. prop_op ES el offset ---
+                offset = prop_op.value
+                self._emit(f"# (Accediendo a campo en offset {offset})")
+                self._emit(f"lw $t1, {offset}($t0)") # t1 = Mem[base + offset]
+                self._store_op("$t1", inst.result) # result = t1
+            
+            elif prop_op.is_constant and isinstance(prop_op.value, str):
+                # --- CASO 2: Es un MÉTODO. prop_op ES el nombre ---
+                member_name = str(prop_op.value)
+                class_name = str(obj_op.typ)
+                implementation_class = self._find_method_implementation_class(class_name, member_name)
+                method_label = self._sanitize_label(f"{implementation_class}.{member_name}") 
+                
+                self._emit(f"# (Resolviendo dirección de método {method_label})")
+                self._emit(f"la $t0, {method_label}")
+                self._store_op("$t0", inst.result) # result = addr(getX)
+            
+            else:
+                self._emit(f"# ERROR: FIELD_ACCESS no sabe qué hacer con {prop_op}")    
+            
+        elif op == TACOp.FIELD_ASSIGN: # result.arg1 = arg2 (obj.prop = value)
+            obj_op = inst.result
+            prop_op = inst.arg1 # ¡Este es el operando clave!
+            value_op = inst.arg2
+            
+            if prop_op.is_constant and isinstance(prop_op.value, int):
+                # --- Es un CAMPO. prop_op ES el offset ---
+                offset = prop_op.value
+                self._emit(f"# (Asignando a campo en offset {offset})")
+                self._load_op("$t0", obj_op)    # t0 = base address
+                self._load_op("$t1", value_op)  # t1 = value
+                self._emit(f"sw $t1, {offset}($t0)") # Mem[base + offset] = value
+            else:
+                # No deberías poder asignar a un método
+                self._emit(f"# ERROR: FIELD_ASSIGN no puede asignar a {prop_op} (no es un offset int)")
+        
+        # --- Control de Flujo ---
+        elif op == TACOp.GOTO:
+            self._emit(f"j {inst.arg1}")
+        elif op == TACOp.IF_TRUE:
+            self._load_op("$t0", inst.arg1)
+            self._emit(f"bne $t0, $zero, {inst.arg2}") # Branch if t0 != 0
+        elif op == TACOp.IF_FALSE:
+            self._load_op("$t0", inst.arg1)
+            self._emit(f"beq $t0, $zero, {inst.arg2}") # Branch if t0 == 0
+        elif op == TACOp.LABEL:
+            self._emit(f"{inst.arg1}:", indent=0)
+
+        # --- Funciones y Stack ---
+        elif op == TACOp.FUNC_START:
+            label = str(inst.arg1)  # Obtener nombre original
+            
+            if "." in label:
+                parts = label.split(".")
+                label = "_".join(parts)  # Point.constructor → Point_constructor
+            else:
+                label = self._sanitize_label(label)
+            
+            self._emit(f"{label}:", indent=0)
+            self.temp_map = {}
+            self.current_frame_size = 0
+            self.current_temp_offset = 0
+
+        elif op == TACOp.ENTER: # Prolog
+            size = inst.arg1.value
+            self.current_frame_size = size 
+            
+            self._emit("subu $sp, $sp, 8")
+            self._emit("sw $ra, 4($sp)")
+            self._emit("sw $fp, 0($sp)")
+            self._emit("move $fp, $sp")
+            
+            if size > 0:
+                self._emit(f"subu $sp, $sp, {size}")
+
+        elif op == TACOp.LEAVE: # Epilog
+            # Este código AHORA solo se usará si la función
+            # termina sin un 'return' explícito.
+            if self.current_frame_size > 0:
+                self._emit(f"addu $sp, $sp, {self.current_frame_size}")
+            
+            self._emit("lw $ra, 4($sp)")
+            self._emit("lw $fp, 0($sp)")
+            self._emit("addu $sp, $sp, 8")
+            
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # ¡FALTABA ESTO! Las funciones sin 'return' deben retornar.
+            self._emit("jr $ra")
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+            
+        elif op == TACOp.RETURN:
+            # --- ***** INICIO DE CORRECCIÓN TOTAL ***** ---
+            
+            # 1. Cargar el valor de retorno (si existe) MIENTRAS $fp es válido
+            if inst.arg1:
+                self._load_op("$v0", inst.arg1) # $v0 = valor de retorno
+            
+            # 2. Emitir el EPÍLOGO (LEAVE) aquí mismo
+            if self.current_frame_size > 0:
+                self._emit(f"addu $sp, $sp, {self.current_frame_size}")
+            
+            self._emit("lw $ra, 4($sp)") # Restaurar $ra
+            self._emit("lw $fp, 0($sp)") # Restaurar $fp
+            self._emit("addu $sp, $sp, 8")
+            
+            # 3. Saltar a la dirección de retorno ($ra) AHORA RESTAURADA
+            self._emit("jr $ra")
+
+        # --- Llamadas ---
+        elif op == TACOp.PUSH: # Poner en el stack
+            self._load_op("$t0", inst.arg1)
+            self._emit("subu $sp, $sp, 4")
+            self._emit("sw $t0, 0($sp)")
+
+        elif op == TACOp.CALL:
+            op_operand = inst.arg1
+            op_name = str(op_operand) # "toString", "t24", "fibonacci"
+            
+            # --- HACK: Interceptar toString ---
+            if "toString" in op_name:
+                self._emit("# Interceptando llamada a toString -> _int_to_string")
+                self._emit("lw $a0, 0($sp)") # Cargar el entero desde el stack
+                self._emit("jal _int_to_string")
+                
+                # Guardar el resultado de toString si es necesario
+                if inst.result:
+                    self._store_op("$v0", inst.result)
+            
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            
+            # SI el operando es un temporal (tN), es una llamada INDIRECTA
+            # (el temporal CONTIENE la dirección de la función)
+            elif op_operand.is_temp:
+                self._emit(f"# Llamada indirecta a puntero en temporal '{op_name}'")
+                self._load_op("$t0", op_operand) # Cargar la dirección desde el stack a $t0
+                self._emit("jalr $t0")          # Jump And Link Register
+            
+            # SI NO es temporal, es una etiqueta (llamada DIRECTA)
+            else:
+                # Es una función normal (ej: "fibonacci", "Persona_constructor")
+                label = self._sanitize_label(op_name)
+                self._emit(f"jal {label}")
+            
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+
+            # Guardar el valor de retorno (excepto para toString, que se maneja arriba)
+            if "toString" not in op_name and inst.result:
+                self._store_op("$v0", inst.result)
+            
+        elif op == TACOp.ADD_SP: # Limpiar args del stack (SP = SP + 8)
+            self._emit(f"addu $sp, $sp, {inst.arg1.value}")
+
+        elif op == TACOp.POP: # Sacar de stack y guardar en resultado
+            self._emit("lw $t0, 0($sp)")
+            self._emit("addu $sp, $sp, 4")
+            self._store_op("$t0", inst.result)
+            
+        # --- Helpers (PRINT, NEW) ---
+        elif op == TACOp.PRINT:
+            operand = inst.arg1
+            self._load_op("$a0", operand) # $a0 = argumento a imprimir
+            
+            op_type = operand.typ # <-- Leer el tipo del operando
+            
+            self._emit(f"# (Llamando a print para tipo: {op_type})")
+            
+            if op_type == 'string':
+                self._emit("jal _print_string")
+            elif op_type == 'boolean':
+                self._emit("jal _print_boolean")
+            else:
+                self._emit("jal _print_int")
+        
+        elif op == TACOp.NEW:
+            arg1_op = inst.arg1
+
+            if arg1_op.is_constant and isinstance(arg1_op.value, int):
+                # --- Es un ARREGLO (déjalo como está) ---
+                num_elements = arg1_op.value
+                size = num_elements * 4 # 4 bytes por elemento (int)
+                self._emit(f"# Alocando {size} bytes para array[{num_elements}]")
+                self._emit(f"li $a0, {size}")
+
+            elif isinstance(arg1_op.value, str):
+                # --- Es una CLASE (AQUÍ ESTÁ EL HACK) ---
+                class_name = str(arg1_op.value)
+
+                size = 64 # Reservar 64 bytes para CUALQUIER objeto
+                self._emit(f"# Alocando {size} bytes (hack) para {class_name}")
+                self._emit(f"li $a0, {size}")
+
+            else:
+                self._emit(f"# ERROR: 'NEW' no sabe qué hacer con {arg1_op}")
+                self._emit(f"li $a0, 0")
+
+            self._emit("jal _alloc")
+            self._store_op("$v0", inst.result) # result = new object ptr
+
+    # --- HELPERS DE TRADUCCIÓN ---
+
+    def _translate_binary_op(self, inst: TACInstruction, mips_op: str):
+        """Helper genérico para t3 = t1 op t2"""
+        self._load_op("$t0", inst.arg1)
+        self._load_op("$t1", inst.arg2)
+        self._emit(f"{mips_op} $t2, $t0, $t1")
+        self._store_op("$t2", inst.result)
+
+    def _get_temp_offset(self, op_name: str) -> int:    
+        """
+        Obtiene el offset del stack para un temporal 'tK'.
+        ...
+        """
+        if op_name not in self.temp_map:
+            # + 4 bytes por temporal
+            self.current_temp_offset += 4
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # Mapea 'tK' al offset total (locales + este temp)
+            # self.current_frame_size fue seteado en 'generate' (para main)
+            # o en 'ENTER' (para funciones).
+            self.temp_map[op_name] = self.current_frame_size + self.current_temp_offset
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+        
+        current_offset = self.temp_map[op_name]
+
+        # Rastrear el offset máximo usado en main
+        if not self.in_function: # Si estamos en main (_script_start)
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # Rastrear solo el offset MÁXIMO *de los temporales*
+            self.main_max_temp_offset = max(self.main_max_temp_offset, self.current_temp_offset)
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+        
+        return current_offset
+
+    def _load_op(self, reg: str, op: TACOperand):
+        """
+        Emite MIPS para cargar el VALOR de un operando TAC en un registro.
+        """
+        if isinstance(op, str):
+            op = TACOperand(op)
+
+        if op is None:
+             self._emit(f"# ADVERTENCIA: _load_op recibió operando NULO")
+             self._emit(f"li {reg}, 0") # Cargar 0 por si acaso
+             return
+
+        op_name = str(op) # <-- FIX: Usar str(op) como el nombre/llave
+
+        if op.is_constant:
+            if op.value is None:
+                # Cargar 'null'
+                self._emit(f"li {reg}, 0")
+            elif isinstance(op.value, str):
+                # Cargar dirección de string
+                label = self.strings[op.value]
+                self._emit(f"la {reg}, {label}")
+            else:
+                # Cargar valor inmediato (int, bool)
+                val = 1 if op.value is True else (0 if op.value is False else op.value)
+                self._emit(f"li {reg}, {val}")
+        
+        elif op_name == "this":
+            self._emit(f"# Cargando 'this' (desde FP[8])")
+            self._emit(f"lw {reg}, 8($fp)")
+        
+        elif _is_temp_name(op_name): # <-- FIX: Usar _is_temp_name(op_name)
+            offset = self._get_temp_offset(op_name) # <-- FIX: Usar op_name
+            self._emit(f"lw {reg}, -{offset}($fp)") # Cargar desde stack
+        
+        elif op_name.startswith("FP["): # <-- FIX: Usar op_name
+            offset = op_name[3:-1] # Extraer 'offset'
+            self._emit(f"lw {reg}, {offset}($fp)") # Cargar desde stack
+
+        elif op_name in self.globals: # <-- FIX: Usar op_name
+            label = f"global_{op_name[2:]}"
+            self._emit(f"la $at, {label}")    # Cargar dirección global
+            self._emit(f"lw {reg}, 0($at)")   # Cargar VALOR en esa dirección
+        
+        else:
+            self._emit(f"# ADVERTENCIA: _load_op no sabe cómo cargar '{op_name}'")
+
+    def _sanitize_label(self, label: str) -> str:
+        """Reemplaza caracteres no válidos de MIPS por '_'."""
+        # Manejar casos especiales para clases
+        if "." in label:
+            # Ejemplo: "Point.constructor" → "Point_constructor"
+            parts = label.split(".")
+            return "_".join(parts)
+        return label.replace(".", "_")
+
+    def _store_op(self, reg: str, op: TACOperand):
+        """
+        Emite MIPS para guardar un valor (en reg) en la UBICACIÓN de un operando.
+        """
+
+        if isinstance(op, str):
+            op = TACOperand(op)
+            
+        if op is None:
+             self._emit(f"# ADVERTENCIA: _store_op recibió operando NULO")
+             return
+
+        op_name = str(op) # <-- FIX: Usar str(op) como el nombre/llave
+
+        if _is_temp_name(op_name): # <-- FIX: Usar _is_temp_name(op_name)
+            offset = self._get_temp_offset(op_name) # <-- FIX: Usar op_name
+            self._emit(f"sw {reg}, -{offset}($fp)") # Guardar en stack
+        
+        elif op_name.startswith("0x"): # <-- FIX: Usar op_name
+            label = f"global_{op_name[2:]}"
+            self._emit(f"la $at, {label}") # Cargar dirección global en $at
+            self._emit(f"sw {reg}, 0($at)") # Guardar valor en esa dirección
+
+        elif op_name.startswith("FP["): # <-- FIX: Usar op_name
+            offset = op_name[3:-1] # Extraer 'offset'
+            self._emit(f"sw {reg}, {offset}($fp)")
+
+        else:
+            self._emit(f"# ADVERTENCIA: _store_op no sabe cómo guardar en '{op_name}'")
+
+    def _get_addr(self, reg: str, op: TACOperand):
+        """
+        Emite MIPS para cargar la DIRECCIÓN de un operando en un registro.
+        Usado para DEREF (@)
+        """
+        if str(op.value).startswith("0x"): # Global '0x...'
+            label = f"global_{op.value[2:]}"
+            self._emit(f"la {reg}, {label}")
+            
+        elif str(op.value).startswith("FP["): # Local/Param 'FP[offset]'
+            offset = str(op.value)[3:-1]
+            self._emit(f"addi {reg}, $fp, {offset}")
+
+        else:
+            self._emit(f"# ADVERTENCIA: _get_addr no sabe cómo obtener dirección de '{op}'")
+
+    
+    def _find_method_implementation_class(self, class_name: str, method_name: str) -> str:
+        """
+        Busca en la jerarquía de herencia la clase que REALMENTE implementa el método.
+        Retorna el nombre de esa clase.
+        """
+        current_class_name = class_name
+        while current_class_name:
+            class_layout = self.class_layouts.get(current_class_name)
+            if not class_layout:
+                return class_name # Fallback: no se encontró la clase base, asumir que es la actual
+
+            # Usar el _ctx (guardado por SymbolCollector) para encontrar el scope
+            class_ctx = getattr(class_layout, "_ctx", None)
+            if class_ctx and class_ctx in self.scopes_by_ctx:
+                class_scope = self.scopes_by_ctx[class_ctx]
+                
+                # Buscar el *símbolo* en el scope de esta clase
+                method_sym = class_scope.symbols.get(method_name)
+                
+                # Si existe Y es una función (no un campo)
+                if method_sym and isinstance(method_sym, FunctionSymbol):
+                    # ¡Encontrado! Esta clase define el método
+                    return current_class_name
+
+            # Si no, subir a la clase base
+            current_class_name = class_layout.base_name
+        
+        return class_name # Fallback: no se encontró, asumir actual

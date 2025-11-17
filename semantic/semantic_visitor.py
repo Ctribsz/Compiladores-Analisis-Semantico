@@ -75,7 +75,11 @@ class SymbolCollector(CompiscriptVisitor):
     def visitProgram(self, ctx):
         self._bind_scope(ctx, self.global_scope)
         r = self.visitChildren(ctx)
-        self._finalize_inheritance()   
+        self._finalize_inheritance()
+        
+        # NUEVO: Calcular offsets después de recolectar todos los símbolos
+        self._calculate_offsets()
+        
         return r
 
     # block: '{' statement* '}';
@@ -235,32 +239,45 @@ class SymbolCollector(CompiscriptVisitor):
             return a.ret.name == b.ret.name
 
         def merge(derived, base):
-            # Métodos: heredar; permitir override compatible; NO heredar 'constructor'
-            for mname, mt in base.methods.items():
-                if mname == "constructor":
-                    continue
-                if mname in derived.methods:
-                    dt = derived.methods[mname]
-                    if not same_sig(dt, mt):
-                        ctx = getattr(derived, "_ctx", None)
-                        line = ctx.start.line if ctx else 0
-                        col  = ctx.start.column if ctx else 0
-                        self.errors.report(line, col, "E053",
-                            f"Override incompatible de método '{mname}' en '{derived.name}'.")
-                    # si es compatible, se queda el de la derivada
-                else:
-                    derived.methods[mname] = mt
-            # Campos: conflicto si el derivado redeclara un campo de la base
-            for fname, ft in base.fields.items():
-                if fname in derived.fields:
-                    ctx = getattr(derived, "_ctx", None)
-                    line = ctx.start.line if ctx else 0
-                    col  = ctx.start.column if ctx else 0
-                    self.errors.report(line, col, "E054",
-                        f"Campo '{fname}' en '{derived.name}' ya existe en la base '{base.name}'.")
-                    # se mantiene el del derivado
-                else:
-                    derived.fields[fname] = ft
+                    # Métodos: (Tu lógica de métodos está bien)
+                    for mname, mt in base.methods.items():
+                        if mname == "constructor":
+                            continue
+                        if mname in derived.methods:
+                            dt = derived.methods[mname]
+                            if not same_sig(dt, mt):
+                                ctx = getattr(derived, "_ctx", None)
+                                line = ctx.start.line if ctx else 0
+                                col  = ctx.start.column if ctx else 0
+                                self.errors.report(line, col, "E053",
+                                    f"Override incompatible de método '{mname}' en '{derived.name}'.")
+                        else:
+                            derived.methods[mname] = mt
+                    
+                    # --- ***** INICIO DE CORRECCIÓN DE CAMPOS ***** ---
+                    
+                    # Campos: Empezar con los de la base, luego añadir los de la derivada.
+                    new_fields = {}
+
+                    # 1. Añadir todos los campos de la base PRIMERO
+                    if base.fields: # Asegurarse de que no sea None
+                        for fname, ft in base.fields.items():
+                            new_fields[fname] = ft
+                        
+                    # 2. Añadir/Sobrescribir con los campos de la derivada
+                    if derived.fields: # Asegurarse de que no sea None
+                        for fname, ft in derived.fields.items():
+                            if fname in new_fields: # Campo ya existe en la base
+                                ctx = getattr(derived, "_ctx", None)
+                                line = ctx.start.line if ctx else 0
+                                col  = ctx.start.column if ctx else 0
+                                self.errors.report(line, col, "E054",
+                                    f"Campo '{fname}' en '{derived.name}' ya existe en la base '{base.name}'.")
+                            new_fields[fname] = ft # Añadir/sobrescribir de todos modos
+                    
+                    # Reemplazar el diccionario de campos de la derivada por el nuevo
+                    derived.fields = new_fields
+                    # --- ***** FIN DE CORRECCIÓN DE CAMPOS ***** ---
 
         def dfs(csym):
             vis = getattr(csym, "_vis", 0)
@@ -305,6 +322,256 @@ class SymbolCollector(CompiscriptVisitor):
         for cs in self.classes.values():
             if hasattr(cs, "_vis"): delattr(cs, "_vis")
 
+    # ============================================
+    # NUEVO: Métodos para calcular offsets y registros de activación
+    # ============================================
+    
+    def _calculate_offsets(self):   
+        """Calcula offsets y tamaños para todos los símbolos"""
+        print("=== CALCULANDO OFFSETS ===")  # DEBUG
+        
+        # --- INICIO DE CORRECCIÓN: Calcular locales de 'main' ---
+        
+        # 1. Encontrar el scope del 'program' (el scope raíz de 'main')
+        program_scope = None
+        for ctx, scope in self.scopes_by_ctx.items():
+            if isinstance(ctx, CompiscriptParser.ProgramContext):
+                program_scope = scope
+                break
+        
+        main_locals_size = 0
+        if program_scope:
+            # 2. Calcular recursivamente el tamaño de locales en 'main'
+            #    Esto encontrará 'fk' en el 'while' y le asignará offset 0.
+            #    base_offset=0 significa que los locales de main empiezan en 0.
+            main_locals_size = self._calculate_locals_in_scope(program_scope, base_offset=0)
+        
+        # 3. Guardar este tamaño en el global_scope para que MIPSGenerator lo lea
+        setattr(self.global_scope, "main_locals_size", main_locals_size)
+        print(f"  Main script locals_size = {main_locals_size}")
+        
+        # --- FIN DE CORRECCIÓN ---
+
+        self._process_global_scope(self.global_scope)
+        
+        # DEBUG: Imprimir lo que calculamos
+        for name, sym in self.global_scope.symbols.items():
+            print(f"Símbolo: {name}")
+            print(f"  - offset: {getattr(sym, 'offset', 'NO TIENE')}")
+            if isinstance(sym, FunctionSymbol):
+                print(f"  - label: {getattr(sym, 'label', 'NO TIENE')}")
+                print(f"  - params_size: {getattr(sym, 'params_size', 0)}")
+                print(f"  - locals_size: {getattr(sym, 'locals_size', 0)}")
+                print(f"  - frame_size: {getattr(sym, 'frame_size', 0)}")
+                for p in (sym.params or []):
+                    print(f"    - param {p.name}: offset={getattr(p, 'offset', 'NO TIENE')}")
+        print("=== FIN CÁLCULO ===")
+        
+    def _process_global_scope(self, scope: Scope):
+        """Procesa el scope global asignando offsets a variables y procesando funciones"""
+        global_offset = 0
+        
+        for name, symbol in scope.symbols.items():
+            if isinstance(symbol, VariableSymbol):
+                # Variables globales: offsets positivos desde 0
+                symbol.offset = global_offset
+                global_offset += self._get_size(symbol.typ)
+            
+            elif isinstance(symbol, FunctionSymbol):
+                # Procesar función
+                self._process_function(symbol)
+            
+            elif isinstance(symbol, ClassSymbol):
+                # Procesar clase
+                self._process_class(symbol)
+                
+                # NUEVO: También procesar métodos de la clase
+                # Buscar el scope de la clase para procesar sus métodos
+                for ctx, scope_inner in self.scopes_by_ctx.items():
+                    if ctx in self.scopes_by_ctx and hasattr(ctx, 'Identifier'):
+                        try:
+                            if hasattr(ctx, 'classMember') and ctx.Identifier().getText() == name:
+                                # Procesar funciones en el scope de la clase
+                                for method_name, method_sym in scope_inner.symbols.items():
+                                    if isinstance(method_sym, FunctionSymbol):
+                                        self._process_function(method_sym)
+                        except:
+                            pass
+    
+    def _process_function(self, fsym: FunctionSymbol):
+        """Calcula offsets y tamaños para una función"""
+        fsym.label = f"L_{fsym.name}"
+        
+        param_offset = -4
+        for param in (fsym.params or []):
+            param.offset = param_offset
+            param_offset -= self._get_size(param.typ)
+        
+        fsym.params_size = abs(param_offset) - 4
+        
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # 1. Encontrar el *scope del bloque* de la función
+        func_block_scope = self._find_function_block_scope(fsym.name)
+        
+        if func_block_scope:
+            # 2. Calcular el tamaño MÁXIMO de locales *dentro* de ese bloque
+            total_size = self._calculate_locals_in_scope(func_block_scope, base_offset=0)
+            fsym.locals_size = total_size
+        else:
+            fsym.locals_size = 0
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+        
+        # Frame size = params + locals + overhead (TU overhead es 12)
+        fsym.frame_size = fsym.params_size + fsym.locals_size + 12
+        
+        print(f"  Función {fsym.name}: params_size={fsym.params_size}, locals_size={fsym.locals_size}, frame_size={fsym.frame_size}")
+
+    def _find_function_block_scope(self, func_name: str) -> Optional[Scope]:
+        """
+        Busca el scope del *bloque* de una función por su nombre.
+        (Reemplaza a _find_function_scope)
+        """
+        for ctx, scope in self.scopes_by_ctx.items():
+            if isinstance(ctx, CompiscriptParser.FunctionDeclarationContext):
+                ctx_name = _first_identifier_text(ctx)
+                if ctx_name == func_name:
+                    # Este es el contexto de la función, buscar su scope de bloque
+                    block_ctx = ctx.block()
+                    if block_ctx in self.scopes_by_ctx:
+                        return self.scopes_by_ctx[block_ctx]
+        return None
+    
+    def _process_class(self, csym: ClassSymbol):
+        """Calcula tamaño de instancia para una clase y procesa sus métodos"""
+        
+        # --- ***** INICIO DE CORRECCIÓN (La definitiva) ***** ---
+        
+        field_offset = 0
+        
+        # 1. Obtener el scope de la clase (para procesar métodos)
+        class_ctx = getattr(csym, "_ctx", None)
+        if not (class_ctx and class_ctx in self.scopes_by_ctx):
+            csym.instance_size = 0
+            return 
+        class_scope = self.scopes_by_ctx[class_ctx] # Este es el scope de la clase actual
+
+        
+        # 2. Iterar sobre el DICCIONARIO 'fields' (ordenado por 'merge')
+        #    Esto garantiza el orden: base.field1, base.field2, derived.field1
+        for field_name, field_type in (csym.fields or {}).items():
+            
+            # 3. Buscar el VariableSymbol real para ASIGNARLE el offset
+            field_sym = None
+            
+            # Búsqueda manual en la jerarquía de scopes de CLASE
+            temp_csym = csym
+            while temp_csym:
+                temp_ctx_search = getattr(temp_csym, "_ctx", None)
+                if temp_ctx_search and temp_ctx_search in self.scopes_by_ctx:
+                    temp_scope = self.scopes_by_ctx[temp_ctx_search]
+                    sym_from_scope = temp_scope.symbols.get(field_name)
+                    
+                    # ¡Usar sym_from_scope, NO sym!
+                    if sym_from_scope and isinstance(sym_from_scope, VariableSymbol):
+                        field_sym = sym_from_scope # Asignar el símbolo encontrado
+                        break # ¡Encontrado!
+                temp_csym = temp_csym.base # Subir a la clase base
+
+            # 4. Asignar el offset
+            if field_sym:
+                # Asignar el offset al símbolo (que vive en su scope original)
+                field_sym.offset = field_offset
+            
+            # 5. Incrementar el offset (usando la función corregida)
+            field_offset += self._get_size(field_type)
+
+        csym.instance_size = field_offset
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+
+        # 6. Procesar métodos (esto estaba bien)
+        for name, symbol in class_scope.symbols.items():
+            if isinstance(symbol, FunctionSymbol):
+                # Procesar cada método como una función
+                self._process_function(symbol)
+    
+    def _calculate_locals_in_scope(self, scope: Scope, base_offset: int = 0) -> int:
+        """
+        Calcula el tamaño total de variables locales en un scope
+        y asigna offsets a cada variable local (RECURSIVO)
+        
+        Retorna: El offset MÁXIMO alcanzado en esta rama (base + locales + max_hijo)
+        """
+        local_offset = base_offset
+        
+        # 1. Asignar offsets a variables locales en *este* scope
+        for name, symbol in scope.symbols.items():
+            # Solo procesar símbolos que son VariableSymbol
+            if isinstance(symbol, VariableSymbol):
+                # ¡NO TOCAR parámetros! (offset < 0)
+                is_param = hasattr(symbol, 'offset') and symbol.offset is not None and symbol.offset < 0
+                if not is_param:
+                    symbol.offset = local_offset
+                    local_offset += self._get_size(symbol.typ)
+
+        # 2. Encontrar scopes hijos directos
+        child_scopes_to_scan = []
+        for ctx, s in self.scopes_by_ctx.items():
+            if s.parent == scope:
+                # ¡NO descender a funciones o clases! Sus offsets se manejan por separado.
+                if not isinstance(ctx, (CompiscriptParser.FunctionDeclarationContext, CompiscriptParser.ClassDeclarationContext)):
+                    child_scopes_to_scan.append(s)
+
+        # 3. Recorrer scopes hijos
+        max_offset_reached = local_offset 
+        
+        for child_scope in child_scopes_to_scan:
+            offset_in_branch = self._calculate_locals_in_scope(
+                child_scope, 
+                base_offset=local_offset # Los hijos empiezan donde el padre termina
+            )
+            # El tamaño total es el MÁXIMO de todas las ramas
+            max_offset_reached = max(max_offset_reached, offset_in_branch)
+
+        # Retornamos el offset *máximo* alcanzado por esta rama del árbol de scopes
+        return max_offset_reached
+    
+    def _find_function_scope(self, func_name: str) -> Optional[Scope]:
+        """Busca el scope interno de una función por su nombre"""
+        for ctx, scope in self.scopes_by_ctx.items():
+            # Verificar si es un contexto de función
+            if hasattr(ctx, 'Identifier'):
+                try:
+                    ctx_id = ctx.Identifier()
+                    if ctx_id and ctx_id.getText() == func_name:
+                        # Este es el contexto de la función, buscar su scope interno (el bloque)
+                        if hasattr(ctx, 'block'):
+                            block_ctx = ctx.block()
+                            if block_ctx in self.scopes_by_ctx:
+                                return self.scopes_by_ctx[block_ctx]
+                except:
+                    pass
+        return None
+    
+    def _get_size(self, typ: Type) -> int:
+            """
+            Retorna el tamaño en bytes de un tipo
+            Convención MIPS 32-bit: 4 bytes para todo (primitivos y punteros).
+            """
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            if typ == INTEGER or typ == BOOLEAN:
+                return 4
+            elif typ == STRING:
+                return 4  # Puntero a string (era 8)
+            elif isinstance(typ, ArrayType):
+                return 4  # Puntero a array (era 8)
+            elif isinstance(typ, ClassType):
+                return 4  # Puntero a instancia (era 8)
+            elif isinstance(typ, FunctionType):
+                return 4  # Puntero a función (era 8)
+            else:
+                return 4  # Default
+            # --- ***** FIN DE CORRECCIÓN ***** ---
+        
 # =============================
 # PASS 2: Chequeo de tipos/uso
 # =============================
@@ -313,9 +580,23 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self.errors = errors
         self.current = root_scope
         self.scopes_by_ctx = scopes_by_ctx
+        self.types_by_ctx = {}
         self.func_ret_stack = []
         self.loop_depth = 0
         self.current_class_stack = []  # nombre de clase actual si estamos dentro de un método
+
+    # printStatement: 'print' '(' expression ')' ';'
+    def visitPrintStatement(self, ctx: CompiscriptParser.PrintStatementContext):
+        # Solo necesitamos visitar la expresión para que se
+        # calcule y guarde su tipo en self.types_by_ctx
+        if ctx.expression():
+            self.visit(ctx.expression())
+        return None
+    
+    def _set_type(self, ctx: ParserRuleContext, typ: Type) -> Type:
+        """Guarda el tipo para este nodo de contexto y lo retorna."""
+        self.types_by_ctx[ctx] = typ
+        return typ
 
     def _enter_by_ctx(self, ctx: ParserRuleContext):
         s = self.scopes_by_ctx.get(ctx)
@@ -331,16 +612,18 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         self._exit()
         return r
 
+    # ****** INICIO DE CAMBIOS ******
+    
     def visitTernaryExpr(self, ctx: CompiscriptParser.TernaryExprContext):
         """
         conditionalExpr:
             logicalOrExpr ('?' expression ':' expression)?  # TernaryExpr
         """
-        cond_t = ctx.logicalOrExpr().accept(self)
+        cond_t = self.visit(ctx.logicalOrExpr()) # <--- ARREGLADO (visit)
 
         # Si no hay '?', el valor es el de logicalOrExpr
         if len(ctx.expression()) == 0:
-            return cond_t
+            return self._set_type(ctx, cond_t)
 
         # Con ternario: validar condición y calcular tipo común
         if cond_t != BOOLEAN:
@@ -350,22 +633,23 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         t_then = self.visit(ctx.expression(0))
         t_else = self.visit(ctx.expression(1))
 
-        # Regla de "tipo común": si uno es asignable al otro, el resultado es el más específico.
+        # Regla de "tipo común"
         if self._is_assignable(t_then, t_else):
-            return t_else
+            return self._set_type(ctx, t_else)
         if self._is_assignable(t_else, t_then):
-            return t_then
-
-        # Soporte extra: permitir NULL hacia ref/array/función (si no lo cubre _is_assignable)
+            return self._set_type(ctx, t_then)
         if t_then == NULL and t_else != NULL:
-            return t_else
+            return self._set_type(ctx, t_else)
         if t_else == NULL and t_then != NULL:
-            return t_then
+            return self._set_type(ctx, t_then)
 
         # Incompatible
         self.errors.report(ctx.start.line, ctx.start.column, "E070",
                         f"Ramas incompatibles en ternario: '{t_then}' vs '{t_else}'.")
-        return NULL
+        return self._set_type(ctx, NULL) # <--- ARREGLADO (wrapper)
+
+    # ****** FIN DE CAMBIOS ******
+
 
     def visitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._enter_by_ctx(ctx); r = self.visitChildren(ctx); self._exit(); return r
@@ -464,7 +748,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
 
     # initializer: '=' expression
     def visitInitializer(self, ctx: CompiscriptParser.InitializerContext):
-        return self.visit(ctx.expression())
+        return self._set_type(ctx, self.visit(ctx.expression()))
 
     # assignment (statement):
     #   Identifier '=' expression ';'
@@ -478,20 +762,20 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if name is None:
                 self.errors.report(ctx.start.line, ctx.start.column, "E006",
                                    "Asignación inválida (identificador esperado).")
-                return NULL
+                return self._set_type(ctx, NULL)
             sym = self.current.resolve(name)
             if not sym:
                 self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
-                return NULL
+                return self._set_type(ctx, NULL)
             if sym.is_const:
                 self.errors.report(ctx.start.line, ctx.start.column, "E005", f"No se puede reasignar const '{name}'.")
-                return sym.typ
+                return self._set_type(ctx, sym.typ)
             if not self._is_assignable(rtype, sym.typ):
                 self.errors.report(ctx.start.line, ctx.start.column, "E004",
                                    f"No se puede asignar '{rtype}' a '{sym.typ}'.")
             else:
                 sym.initialized = True
-            return sym.typ
+            return self._set_type(ctx, sym.typ)
         else:
             # assignment: expression '.' Identifier '=' expression ';'
             obj_t = self.visit(ctx.expression(0))           # tipo del objeto
@@ -502,43 +786,75 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             if not self._is_assignable(rhs_t, prop_t):
                 self.errors.report(ctx.start.line, ctx.start.column, "E004",
                                 f"No se puede asignar '{rhs_t}' a '{prop_t}'.")
-            return prop_t
+            return self._set_type(ctx, prop_t)
 
     # expressionStatement: expression ';'
     def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
         self.visit(ctx.expression()); return None
 
     # ---- Expresiones ----
+    # expression: assignmentExpr;
     def visitExpression(self, ctx: CompiscriptParser.ExpressionContext):
-        return self.visitChildren(ctx)
+        # Visita al hijo (assignmentExpr) y guarda su tipo
+        # en el contexto de ESTA expresión
+        child_type = self.visit(ctx.assignmentExpr())
+        return self._set_type(ctx, child_type)
+
+    # ****** INICIO DE CAMBIOS ******
+
+    # (AÑADIR ESTE MÉTODO a TypeCheckerVisitor)
+    # assignmentExpr: lhs=leftHandSide op='=' rhs=assignmentExpr | conditionalExpr;
+    def visitAssignmentExpr(self, ctx: CompiscriptParser.AssignmentExprContext):
+        if ctx.conditionalExpr():
+            # Es un passthrough (no asignación), ej: 'i'
+            # El 'conditionalExpr' es visitado por 'visitTernaryExpr'
+            typ = self.visit(ctx.conditionalExpr())
+        else:
+            # Es una asignación, ej: 'a = 5'
+            # (El chequeo de tipo para la asignación real se hace en 
+            # 'visitAssignment' (statement) y 'visitAssignExpr' (TAC).
+            # Aquí solo necesitamos propagar el tipo de la expresión.)
+            typ = self.visit(ctx.assignmentExpr()) # Visita el RHS
+
+        return self._set_type(ctx, typ)
+
+    # (AÑADIR ESTE MÉTODO a TypeCheckerVisitor)
+    def visitExprNoAssign(self, ctx: CompiscriptParser.ExprNoAssignContext):
+        """Visita expresión sin asignación"""
+        # (Esto asume que el hijo es conditionalExpr, como en tac_generator.py)
+        typ = self.visit(ctx.conditionalExpr())
+        return self._set_type(ctx, typ)
+
+    # ****** FIN DE CAMBIOS ******
+
 
     def visitLiteralExpr(self, ctx: CompiscriptParser.LiteralExprContext):
         txt = ctx.getText()
-        if txt == "true" or txt == "false": return BOOLEAN
-        if txt == "null": return NULL
+        if txt == "true" or txt == "false": return self._set_type(ctx, BOOLEAN)
+        if txt == "null": return self._set_type(ctx, NULL)
         if len(txt) >= 2 and ((txt[0] == '"' and txt[-1] == '"') or (txt[0] == "'" and txt[-1] == "'")):
-            return STRING
-        if txt.lstrip("-").isdigit(): return INTEGER
+            return self._set_type(ctx, STRING)
+        if txt.lstrip("-").isdigit(): return self._set_type(ctx, INTEGER)
         return NULL
 
     # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
     def visitPrimaryExpr(self, ctx: CompiscriptParser.PrimaryExprContext):
         # primaryExpr: literalExpr | leftHandSide | '(' expression ')'
         if ctx.literalExpr() is not None:
-            return self.visit(ctx.literalExpr())
+            return self._set_type(ctx, self.visit(ctx.literalExpr()))
         if ctx.leftHandSide() is not None:
-            return self.visit(ctx.leftHandSide())
+            return self._set_type(ctx, self.visit(ctx.leftHandSide()))
         if ctx.expression() is not None:
             # caso paréntesis: devolver el tipo de la expresión interna
-            return self.visit(ctx.expression())
-        return NULL
+            return self._set_type(ctx, self.visit(ctx.expression()))
+        return self._set_type(ctx, NULL)
 
     # leftHandSide: primaryAtom (suffixOp)* ;
     def visitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
         t = self.visit(ctx.primaryAtom())
         for s in ctx.suffixOp():
             t = self._suffix_apply_by_token(s, t)
-        return t
+        return self._set_type(ctx, t)
 
     # primaryAtom:
     #   Identifier           # IdentifierExpr
@@ -549,8 +865,8 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         sym = self.current.resolve(name)
         if not sym:
             self.errors.report(ctx.start.line, ctx.start.column, "E002", f"Identificador no declarado '{name}'.")
-            return NULL
-        return sym.typ
+            return self._set_type(ctx, NULL)
+        return self._set_type(ctx, sym.typ)
 
     def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
         cname = ctx.Identifier().getText()
@@ -561,7 +877,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             # clase no declarada
             for e in args: self.visit(e)  # igual tipamos args para propagar
             self.errors.report(ctx.start.line, ctx.start.column, "E037", f"Clase '{cname}' no declarada.")
-            return ClassType(cname)  # devolvemos el tipo para no cascada de errores
+            return self._set_type(ctx, ClassType(cname))  # devolvemos el tipo para no cascada de errores
 
         ctor = csym.methods.get("constructor")
         if not ctor:
@@ -572,7 +888,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
             else:
                 # nada que validar
                 pass
-            return ClassType(cname)
+            return self._set_type(ctx, ClassType(cname))
 
         # validar aridad
         if len(args) != len(ctor.params):
@@ -585,14 +901,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if not self._is_assignable(actual, expected):
                     self.errors.report(e.start.line, e.start.column, "E022",
                                     f"Arg {i+1} en constructor de '{cname}': '{actual}' no asignable a '{expected}'.")
-        return ClassType(cname)
+        return self._set_type(ctx, ClassType(cname))
 
 
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
         if not self.current_class_stack:
             self.errors.report(ctx.start.line, ctx.start.column, "E043", "this no puede usarse fuera de un método de clase.")
-            return NULL
-        return ClassType(self.current_class_stack[-1])
+            return self._set_type(ctx, NULL)
+        return self._set_type(ctx, ClassType(self.current_class_stack[-1]))
 
     # foreach (...) { ... }  
     def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
@@ -618,69 +934,76 @@ class TypeCheckerVisitor(CompiscriptVisitor):
     def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
         exprs = ctx.expression()
         if not exprs:
-            return ArrayType(NULL)
+            return self._set_type(ctx, ArrayType(NULL))
         t0 = self.visit(exprs[0])
         for e in exprs[1:]:
             ti = self.visit(e)
             if t0.name != ti.name:
                 self.errors.report(ctx.start.line, ctx.start.column, "E011",
                                    f"Elementos de arreglo deben tener mismo tipo: {t0} vs {ti}.")
-        return ArrayType(t0)
+        return self._set_type(ctx, ArrayType(t0))
+
+    # ****** INICIO DE CAMBIOS ******
 
     # logical OR/AND
     def visitLogicalOrExpr(self, ctx: CompiscriptParser.LogicalOrExprContext):
         n = len(ctx.logicalAndExpr())
         if n == 1:
-            return ctx.logicalAndExpr(0).accept(self)
+            child_t = self.visit(ctx.logicalAndExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
         for i in range(n):
-            t = ctx.logicalAndExpr(i).accept(self)
+            t = self.visit(ctx.logicalAndExpr(i)) # Usar visit()
             if t != BOOLEAN:
                 self._op_err(ctx, "||", t, "boolean")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     def visitLogicalAndExpr(self, ctx: CompiscriptParser.LogicalAndExprContext):
         n = len(ctx.equalityExpr())
         if n == 1:
-            return ctx.equalityExpr(0).accept(self)
+            child_t = self.visit(ctx.equalityExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
         for i in range(n):
-            t = ctx.equalityExpr(i).accept(self)
+            t = self.visit(ctx.equalityExpr(i)) # Usar visit()
             if t != BOOLEAN:
                 self._op_err(ctx, "&&", t, "boolean")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # ==, !=
     def visitEqualityExpr(self, ctx: CompiscriptParser.EqualityExprContext):
         n = len(ctx.relationalExpr())
         if n == 1:
-            return ctx.relationalExpr(0).accept(self)
-        left = ctx.relationalExpr(0).accept(self)
+            child_t = self.visit(ctx.relationalExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
+        left = self.visit(ctx.relationalExpr(0)) # Usar visit()
         for i in range(1, n):
-            right = ctx.relationalExpr(i).accept(self)
+            right = self.visit(ctx.relationalExpr(i)) # Usar visit()
             if not self._eq_compatible(left, right):
                 self._op_err(ctx, "==/!=", f"{left} vs {right}")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # <,<=,>,>=  (integer)
     def visitRelationalExpr(self, ctx: CompiscriptParser.RelationalExprContext):
         n = len(ctx.additiveExpr())
         if n == 1:
-            return ctx.additiveExpr(0).accept(self)
-        t0 = ctx.additiveExpr(0).accept(self)
+            child_t = self.visit(ctx.additiveExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
+        t0 = self.visit(ctx.additiveExpr(0)) # Usar visit()
         for i in range(1, n):
-            ti = ctx.additiveExpr(i).accept(self)
+            ti = self.visit(ctx.additiveExpr(i)) # Usar visit()
             if t0 != INTEGER or ti != INTEGER:
                 self._op_err(ctx, "relacional", f"{t0} y {ti}", "integer")
-        return BOOLEAN
+        return self._set_type(ctx, BOOLEAN)
 
     # +, -
     def visitAdditiveExpr(self, ctx: CompiscriptParser.AdditiveExprContext):
         n = len(ctx.multiplicativeExpr())
         if n == 1:
-            return ctx.multiplicativeExpr(0).accept(self)
+            child_t = self.visit(ctx.multiplicativeExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
 
-        res = ctx.multiplicativeExpr(0).accept(self)
+        res = self.visit(ctx.multiplicativeExpr(0)) # Usar visit()
         for i in range(1, n):
-            t = ctx.multiplicativeExpr(i).accept(self)
+            t = self.visit(ctx.multiplicativeExpr(i)) # Usar visit()
             # Si aparece string en una suma/resta:
             if res == STRING or t == STRING:
                 # Permitimos concatenación si todos son string; si hay mezcla, error
@@ -692,31 +1015,37 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if res != INTEGER or t != INTEGER:
                     self._op_err(ctx, "+/-", f"{res} y {t}", "integer")
                 res = INTEGER
-        return res
+        return self._set_type(ctx, res)
 
     # *, /, %
     def visitMultiplicativeExpr(self, ctx: CompiscriptParser.MultiplicativeExprContext):
         n = len(ctx.unaryExpr())
         if n == 1:
-            return ctx.unaryExpr(0).accept(self)
+            child_t = self.visit(ctx.unaryExpr(0))
+            return self._set_type(ctx, child_t) # Guardar el tipo del hijo
         for i in range(n):
-            t = ctx.unaryExpr(i).accept(self)
+            t = self.visit(ctx.unaryExpr(i)) # Usar visit()
             if t != INTEGER:
                 self._op_err(ctx, "*,/,%", t, "integer")
-        return INTEGER
+        return self._set_type(ctx, INTEGER)
 
     # !  y  - (unario)
     def visitUnaryExpr(self, ctx: CompiscriptParser.UnaryExprContext):
         if ctx.getChildCount() == 2:
             op = ctx.getChild(0).getText()
-            t  = ctx.getChild(1).accept(self)
+            t  = self.visit(ctx.getChild(1)) # Usar visit()
             if op == '!':
                 if t != BOOLEAN: self._op_err(ctx, "!", t, "boolean")
-                return BOOLEAN
+                return self._set_type(ctx, BOOLEAN)
             if op == '-':
                 if t != INTEGER: self._op_err(ctx, "neg", t, "integer")
-                return INTEGER
-        return self.visitChildren(ctx)
+                return self._set_type(ctx, INTEGER)
+        
+        # Passthrough (ej: primaryExpr)
+        child_t = self.visit(ctx.primaryExpr())
+        return self._set_type(ctx, child_t)
+
+    # ****** FIN DE CAMBIOS ******
 
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
         # Tipo del switch(expr)
@@ -808,7 +1137,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                     self.visit(e)
             self.errors.report(sctx.start.line, sctx.start.column, "E020",
                             f"Llamada sobre no-función '{callee_type}'.")
-            return NULL
+            return self._set_type(sctx, NULL)
 
         args = sctx.arguments().expression() if sctx.arguments() else []
         if len(args) != len(callee_type.params):
@@ -821,7 +1150,7 @@ class TypeCheckerVisitor(CompiscriptVisitor):
                 if not self._is_assignable(actual, expected):
                     self.errors.report(e.start.line, e.start.column, "E022",
                                     f"Arg {i+1}: '{actual}' no asignable a '{expected}'.")
-        return callee_type.ret
+        return self._set_type(sctx, callee_type.ret)
 
 
     def _apply_index(self, sctx: CompiscriptParser.IndexExprContext, base_type: Type) -> Type:
@@ -831,12 +1160,14 @@ class TypeCheckerVisitor(CompiscriptVisitor):
         if not isinstance(base_type, ArrayType):
             self.errors.report(sctx.start.line, sctx.start.column, "E031",
                             f"Indexación solo en arreglos, no en '{base_type}'.")
-            return NULL
-        return base_type.elem
+            return self._set_type(sctx, NULL)
+        return self._set_type(sctx, base_type.elem)
 
     def _apply_prop(self, sctx: CompiscriptParser.PropertyAccessExprContext, base_type: Type) -> Type:
         prop = sctx.Identifier().getText()
-        return self._resolve_property_type(base_type, prop, sctx)
+        # _resolve_property_type ya retorna NULL en error, así que solo envolvemos la llamada
+        prop_type = self._resolve_property_type(base_type, prop, sctx)
+        return self._set_type(sctx, prop_type) # <--- CAMBIO
 
     
     # helper interno (añádelo en TypeCheckerVisitor)
