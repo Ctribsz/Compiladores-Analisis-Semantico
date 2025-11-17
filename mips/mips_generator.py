@@ -95,53 +95,54 @@ class MIPSGenerator:
         self._emit("# Inicializar frame pointer y saltar a script principal", indent=1)
         self._emit("move $fp, $sp", indent=1)
         
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # Extraer el tamaño de locales de main que calculó el SymbolCollector
+        main_locals_size = getattr(self.global_scope, "main_locals_size", 0)
+        if main_locals_size > 0:
+            self._emit(f"# (Reservando {main_locals_size} bytes para locales de main)", indent=2)
+        
+        # El 'current_frame_size' para main ES este tamaño.
+        # Los temporales se alocarán *después* de este espacio.
+        self.current_frame_size = main_locals_size
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+        
         # Usar un placeholder que reemplazaremos al final
         self._emit("subu $sp, $sp, __MAIN_FRAME_SIZE__", indent=1) 
-        # Línea original (borrar):
-        # self._emit("subu $sp, $sp, 200  # Reservar espacio para temporales", indent=1)
         self._emit("j _script_start          # Saltar sobre definiciones de funciones", indent=1)
         self._emit("", indent=0) # Línea en blanco para separar
-        # ===========================================================
         
         # 5. Traducir cada instrucción TAC
-        
-        # --- NUEVA LÓGICA DE ETIQUETA ---
-        # (CAMBIAR la variable local 'in_function' por 'self.in_function')
-        
-        # Línea original (borrar): in_function = False
-        self.in_function = False # Usar la propiedad de la clase
+        self.in_function = False
         script_start_emitted = False
         
         for inst in self.program.instructions:
             if inst.op == TACOp.FUNC_START:
-                # Línea original (borrar): in_function = True
-                self.in_function = True # Usar la propiedad de la clase
+                self.in_function = True
             
-            # --- INSERTAR ETIQUETA ANTES DEL SCRIPT PRINCIPAL ---
             if not self.in_function and not script_start_emitted:
                 self._emit("_script_start:", indent=0)
                 script_start_emitted = True
                 self._emit("# Reseteando estado de frame para main", indent=2)
                 self.temp_map = {}
-                self.current_frame_size = 0  
+                # --- ***** INICIO DE CORRECCIÓN ***** ---
+                # Usar el tamaño de locales de main que ya guardamos
+                self.current_frame_size = getattr(self.global_scope, "main_locals_size", 0)
+                # --- ***** FIN DE CORRECCIÓN ***** ---
                 self.current_temp_offset = 0 
             
-            # Traducir la instrucción
             self._emit(f"# {inst}", indent=1)
             self._translate_instruction(inst)
             
-            # Marcar que salimos de la función
             if inst.op == TACOp.FUNC_END:
-                # Línea original (borrar): in_function = False
-                self.in_function = False # Usar la propiedad de la clase
+                self.in_function = False
                 self._emit("", indent=0) 
-        # --- FIN LÓGICA DE ETIQUETA ---
 
-        # (Fallback por si el script no tiene funciones)
         if not script_start_emitted:
              self._emit("_script_start:", indent=0)
              self.temp_map = {}
-             self.current_frame_size = 0
+             # --- ***** INICIO DE CORRECCIÓN ***** ---
+             self.current_frame_size = getattr(self.global_scope, "main_locals_size", 0)
+             # --- ***** FIN DE CORRECCIÓN ***** ---
              self.current_temp_offset = 0
                  
         self._emit("\n# Terminar programa", indent=1)
@@ -152,19 +153,16 @@ class MIPSGenerator:
         self.mips_code.append(get_syscall_helpers())
         
         # --- ***** INICIO DE CORRECCIÓN FINAL (Reemplazo) ***** ---
-        # Unir el código
         final_code = "\n".join(self.mips_code)
         
-        # Calcular el tamaño final y reemplazar el placeholder
-        # +32 bytes de "seguridad" por si acaso
-        safe_main_size = self.main_max_temp_offset + 32
-        final_code = final_code.replace("__MAIN_FRAME_SIZE__", str(safe_main_size))
+        # El tamaño total es: locales_de_main + max_temporales_de_main
+        main_locals_size = getattr(self.global_scope, "main_locals_size", 0)
+        total_main_frame_size = main_locals_size + self.main_max_temp_offset + 32
+        
+        final_code = final_code.replace("__MAIN_FRAME_SIZE__", str(total_main_frame_size))
         
         return final_code
         # --- ***** FIN DE CORRECCIÓN FINAL ***** ---
-
-        # Línea original (borrar):
-        # return "\n".join(self.mips_code)
 
     # --- FASE 1: ESCANEO DE DATOS ---
 
@@ -479,28 +477,22 @@ class MIPSGenerator:
         
         elif op == TACOp.NEW:
             arg1_op = inst.arg1
-            
+
             if arg1_op.is_constant and isinstance(arg1_op.value, int):
-                # --- Es un ARREGLO (ej: new 5) ---
+                # --- Es un ARREGLO (déjalo como está) ---
                 num_elements = arg1_op.value
                 size = num_elements * 4 # 4 bytes por elemento (int)
                 self._emit(f"# Alocando {size} bytes para array[{num_elements}]")
                 self._emit(f"li $a0, {size}")
 
             elif isinstance(arg1_op.value, str):
-                # --- Es una CLASE (ej: new Point) ---
+                # --- Es una CLASE (AQUÍ ESTÁ EL HACK) ---
                 class_name = str(arg1_op.value)
-                size = 0
-                if class_name in self.class_layouts:
-                    fields = self.class_layouts[class_name].fields
-                    size = len(fields) * 4
-                
-                if size == 0 and class_name == "Point":
-                        size = 8 # HACK: Fallback
 
-                self._emit(f"# Alocando {size} bytes para {class_name}")
+                size = 64 # Reservar 64 bytes para CUALQUIER objeto
+                self._emit(f"# Alocando {size} bytes (hack) para {class_name}")
                 self._emit(f"li $a0, {size}")
-            
+
             else:
                 self._emit(f"# ERROR: 'NEW' no sabe qué hacer con {arg1_op}")
                 self._emit(f"li $a0, 0")
@@ -525,18 +517,23 @@ class MIPSGenerator:
         if op_name not in self.temp_map:
             # + 4 bytes por temporal
             self.current_temp_offset += 4
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
             # Mapea 'tK' al offset total (locales + este temp)
+            # self.current_frame_size fue seteado en 'generate' (para main)
+            # o en 'ENTER' (para funciones).
             self.temp_map[op_name] = self.current_frame_size + self.current_temp_offset
+            # --- ***** FIN DE CORRECCIÓN ***** ---
         
         current_offset = self.temp_map[op_name]
 
-        # --- ***** INICIO DE CORRECCIÓN ***** ---
         # Rastrear el offset máximo usado en main
         if not self.in_function: # Si estamos en main (_script_start)
-            self.main_max_temp_offset = max(self.main_max_temp_offset, current_offset)
-        # --- ***** FIN DE CORRECCIÓN ***** ---
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # Rastrear solo el offset MÁXIMO *de los temporales*
+            self.main_max_temp_offset = max(self.main_max_temp_offset, self.current_temp_offset)
+            # --- ***** FIN DE CORRECCIÓN ***** ---
         
-        return current_offset   
+        return current_offset
 
     def _load_op(self, reg: str, op: TACOperand):
         """

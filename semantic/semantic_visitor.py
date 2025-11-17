@@ -239,32 +239,45 @@ class SymbolCollector(CompiscriptVisitor):
             return a.ret.name == b.ret.name
 
         def merge(derived, base):
-            # Métodos: heredar; permitir override compatible; NO heredar 'constructor'
-            for mname, mt in base.methods.items():
-                if mname == "constructor":
-                    continue
-                if mname in derived.methods:
-                    dt = derived.methods[mname]
-                    if not same_sig(dt, mt):
-                        ctx = getattr(derived, "_ctx", None)
-                        line = ctx.start.line if ctx else 0
-                        col  = ctx.start.column if ctx else 0
-                        self.errors.report(line, col, "E053",
-                            f"Override incompatible de método '{mname}' en '{derived.name}'.")
-                    # si es compatible, se queda el de la derivada
-                else:
-                    derived.methods[mname] = mt
-            # Campos: conflicto si el derivado redeclara un campo de la base
-            for fname, ft in base.fields.items():
-                if fname in derived.fields:
-                    ctx = getattr(derived, "_ctx", None)
-                    line = ctx.start.line if ctx else 0
-                    col  = ctx.start.column if ctx else 0
-                    self.errors.report(line, col, "E054",
-                        f"Campo '{fname}' en '{derived.name}' ya existe en la base '{base.name}'.")
-                    # se mantiene el del derivado
-                else:
-                    derived.fields[fname] = ft
+                    # Métodos: (Tu lógica de métodos está bien)
+                    for mname, mt in base.methods.items():
+                        if mname == "constructor":
+                            continue
+                        if mname in derived.methods:
+                            dt = derived.methods[mname]
+                            if not same_sig(dt, mt):
+                                ctx = getattr(derived, "_ctx", None)
+                                line = ctx.start.line if ctx else 0
+                                col  = ctx.start.column if ctx else 0
+                                self.errors.report(line, col, "E053",
+                                    f"Override incompatible de método '{mname}' en '{derived.name}'.")
+                        else:
+                            derived.methods[mname] = mt
+                    
+                    # --- ***** INICIO DE CORRECCIÓN DE CAMPOS ***** ---
+                    
+                    # Campos: Empezar con los de la base, luego añadir los de la derivada.
+                    new_fields = {}
+
+                    # 1. Añadir todos los campos de la base PRIMERO
+                    if base.fields: # Asegurarse de que no sea None
+                        for fname, ft in base.fields.items():
+                            new_fields[fname] = ft
+                        
+                    # 2. Añadir/Sobrescribir con los campos de la derivada
+                    if derived.fields: # Asegurarse de que no sea None
+                        for fname, ft in derived.fields.items():
+                            if fname in new_fields: # Campo ya existe en la base
+                                ctx = getattr(derived, "_ctx", None)
+                                line = ctx.start.line if ctx else 0
+                                col  = ctx.start.column if ctx else 0
+                                self.errors.report(line, col, "E054",
+                                    f"Campo '{fname}' en '{derived.name}' ya existe en la base '{base.name}'.")
+                            new_fields[fname] = ft # Añadir/sobrescribir de todos modos
+                    
+                    # Reemplazar el diccionario de campos de la derivada por el nuevo
+                    derived.fields = new_fields
+                    # --- ***** FIN DE CORRECCIÓN DE CAMPOS ***** ---
 
         def dfs(csym):
             vis = getattr(csym, "_vis", 0)
@@ -313,9 +326,32 @@ class SymbolCollector(CompiscriptVisitor):
     # NUEVO: Métodos para calcular offsets y registros de activación
     # ============================================
     
-    def _calculate_offsets(self):
+    def _calculate_offsets(self):   
         """Calcula offsets y tamaños para todos los símbolos"""
         print("=== CALCULANDO OFFSETS ===")  # DEBUG
+        
+        # --- INICIO DE CORRECCIÓN: Calcular locales de 'main' ---
+        
+        # 1. Encontrar el scope del 'program' (el scope raíz de 'main')
+        program_scope = None
+        for ctx, scope in self.scopes_by_ctx.items():
+            if isinstance(ctx, CompiscriptParser.ProgramContext):
+                program_scope = scope
+                break
+        
+        main_locals_size = 0
+        if program_scope:
+            # 2. Calcular recursivamente el tamaño de locales en 'main'
+            #    Esto encontrará 'fk' en el 'while' y le asignará offset 0.
+            #    base_offset=0 significa que los locales de main empiezan en 0.
+            main_locals_size = self._calculate_locals_in_scope(program_scope, base_offset=0)
+        
+        # 3. Guardar este tamaño en el global_scope para que MIPSGenerator lo lea
+        setattr(self.global_scope, "main_locals_size", main_locals_size)
+        print(f"  Main script locals_size = {main_locals_size}")
+        
+        # --- FIN DE CORRECCIÓN ---
+
         self._process_global_scope(self.global_scope)
         
         # DEBUG: Imprimir lo que calculamos
@@ -364,67 +400,140 @@ class SymbolCollector(CompiscriptVisitor):
     
     def _process_function(self, fsym: FunctionSymbol):
         """Calcula offsets y tamaños para una función"""
-        # Asignar label a la función
         fsym.label = f"L_{fsym.name}"
         
-        # Calcular offsets para parámetros (negativos, antes del frame)
-        param_offset = -4  # Empezar en -4 (después del return address)
+        param_offset = -4
         for param in (fsym.params or []):
             param.offset = param_offset
             param_offset -= self._get_size(param.typ)
         
-        # Tamaño total de parámetros
         fsym.params_size = abs(param_offset) - 4
         
-        # Buscar el scope de la función para calcular locals
-        func_scope = self._find_function_scope(fsym.name)
-        if func_scope:
-            fsym.locals_size = self._calculate_locals_in_scope(func_scope)
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # 1. Encontrar el *scope del bloque* de la función
+        func_block_scope = self._find_function_block_scope(fsym.name)
+        
+        if func_block_scope:
+            # 2. Calcular el tamaño MÁXIMO de locales *dentro* de ese bloque
+            total_size = self._calculate_locals_in_scope(func_block_scope, base_offset=0)
+            fsym.locals_size = total_size
         else:
             fsym.locals_size = 0
+        # --- ***** FIN DE CORRECCIÓN ***** ---
         
-        # Frame size = params + locals + overhead (12 bytes: return, old FP, static link)
+        # Frame size = params + locals + overhead (TU overhead es 12)
         fsym.frame_size = fsym.params_size + fsym.locals_size + 12
         
-        # DEBUG: Imprimir para verificar
         print(f"  Función {fsym.name}: params_size={fsym.params_size}, locals_size={fsym.locals_size}, frame_size={fsym.frame_size}")
+
+    def _find_function_block_scope(self, func_name: str) -> Optional[Scope]:
+        """
+        Busca el scope del *bloque* de una función por su nombre.
+        (Reemplaza a _find_function_scope)
+        """
+        for ctx, scope in self.scopes_by_ctx.items():
+            if isinstance(ctx, CompiscriptParser.FunctionDeclarationContext):
+                ctx_name = _first_identifier_text(ctx)
+                if ctx_name == func_name:
+                    # Este es el contexto de la función, buscar su scope de bloque
+                    block_ctx = ctx.block()
+                    if block_ctx in self.scopes_by_ctx:
+                        return self.scopes_by_ctx[block_ctx]
+        return None
     
     def _process_class(self, csym: ClassSymbol):
         """Calcula tamaño de instancia para una clase y procesa sus métodos"""
+        
+        # --- ***** INICIO DE CORRECCIÓN (La definitiva) ***** ---
+        
         field_offset = 0
         
-        # Calcular tamaño sumando todos los campos
-        for field_name, field_type in (csym.fields or {}).items():
-            field_offset += self._get_size(field_type)
-        
-        csym.instance_size = field_offset
-        
-        # Los métodos están como FunctionSymbol en el scope de la clase
-        # Necesitamos encontrar ese scope
+        # 1. Obtener el scope de la clase (para procesar métodos)
         class_ctx = getattr(csym, "_ctx", None)
-        if class_ctx and class_ctx in self.scopes_by_ctx:
-            class_scope = self.scopes_by_ctx[class_ctx]
+        if not (class_ctx and class_ctx in self.scopes_by_ctx):
+            csym.instance_size = 0
+            return 
+        class_scope = self.scopes_by_ctx[class_ctx] # Este es el scope de la clase actual
+
+        
+        # 2. Iterar sobre el DICCIONARIO 'fields' (ordenado por 'merge')
+        #    Esto garantiza el orden: base.field1, base.field2, derived.field1
+        for field_name, field_type in (csym.fields or {}).items():
             
-            # Buscar FunctionSymbols en el scope de la clase
-            for name, symbol in class_scope.symbols.items():
-                if isinstance(symbol, FunctionSymbol):
-                    # Procesar cada método como una función
-                    self._process_function(symbol)
+            # 3. Buscar el VariableSymbol real para ASIGNARLE el offset
+            field_sym = None
+            
+            # Búsqueda manual en la jerarquía de scopes de CLASE
+            temp_csym = csym
+            while temp_csym:
+                temp_ctx_search = getattr(temp_csym, "_ctx", None)
+                if temp_ctx_search and temp_ctx_search in self.scopes_by_ctx:
+                    temp_scope = self.scopes_by_ctx[temp_ctx_search]
+                    sym_from_scope = temp_scope.symbols.get(field_name)
+                    
+                    # ¡Usar sym_from_scope, NO sym!
+                    if sym_from_scope and isinstance(sym_from_scope, VariableSymbol):
+                        field_sym = sym_from_scope # Asignar el símbolo encontrado
+                        break # ¡Encontrado!
+                temp_csym = temp_csym.base # Subir a la clase base
+
+            # 4. Asignar el offset
+            if field_sym:
+                # Asignar el offset al símbolo (que vive en su scope original)
+                field_sym.offset = field_offset
+            
+            # 5. Incrementar el offset (usando la función corregida)
+            field_offset += self._get_size(field_type)
+
+        csym.instance_size = field_offset
+        # --- ***** FIN DE CORRECCIÓN ***** ---
+
+        # 6. Procesar métodos (esto estaba bien)
+        for name, symbol in class_scope.symbols.items():
+            if isinstance(symbol, FunctionSymbol):
+                # Procesar cada método como una función
+                self._process_function(symbol)
     
     def _calculate_locals_in_scope(self, scope: Scope, base_offset: int = 0) -> int:
         """
         Calcula el tamaño total de variables locales en un scope
-        y asigna offsets a cada variable local
+        y asigna offsets a cada variable local (RECURSIVO)
+        
+        Retorna: El offset MÁXIMO alcanzado en esta rama (base + locales + max_hijo)
         """
         local_offset = base_offset
         
+        # 1. Asignar offsets a variables locales en *este* scope
         for name, symbol in scope.symbols.items():
+            # Solo procesar símbolos que son VariableSymbol
             if isinstance(symbol, VariableSymbol):
-                # Asignar offset a la variable local
-                symbol.offset = local_offset
-                local_offset += self._get_size(symbol.typ)
+                # ¡NO TOCAR parámetros! (offset < 0)
+                is_param = hasattr(symbol, 'offset') and symbol.offset is not None and symbol.offset < 0
+                if not is_param:
+                    symbol.offset = local_offset
+                    local_offset += self._get_size(symbol.typ)
+
+        # 2. Encontrar scopes hijos directos
+        child_scopes_to_scan = []
+        for ctx, s in self.scopes_by_ctx.items():
+            if s.parent == scope:
+                # ¡NO descender a funciones o clases! Sus offsets se manejan por separado.
+                if not isinstance(ctx, (CompiscriptParser.FunctionDeclarationContext, CompiscriptParser.ClassDeclarationContext)):
+                    child_scopes_to_scan.append(s)
+
+        # 3. Recorrer scopes hijos
+        max_offset_reached = local_offset 
         
-        return local_offset - base_offset
+        for child_scope in child_scopes_to_scan:
+            offset_in_branch = self._calculate_locals_in_scope(
+                child_scope, 
+                base_offset=local_offset # Los hijos empiezan donde el padre termina
+            )
+            # El tamaño total es el MÁXIMO de todas las ramas
+            max_offset_reached = max(max_offset_reached, offset_in_branch)
+
+        # Retornamos el offset *máximo* alcanzado por esta rama del árbol de scopes
+        return max_offset_reached
     
     def _find_function_scope(self, func_name: str) -> Optional[Scope]:
         """Busca el scope interno de una función por su nombre"""
@@ -444,22 +553,24 @@ class SymbolCollector(CompiscriptVisitor):
         return None
     
     def _get_size(self, typ: Type) -> int:
-        """
-        Retorna el tamaño en bytes de un tipo
-        Convención: 4 bytes para primitivos, 8 para referencias
-        """
-        if typ == INTEGER or typ == BOOLEAN:
-            return 4
-        elif typ == STRING:
-            return 8  # Puntero a string
-        elif isinstance(typ, ArrayType):
-            return 8  # Puntero a array
-        elif isinstance(typ, ClassType):
-            return 8  # Puntero a instancia
-        elif isinstance(typ, FunctionType):
-            return 8  # Puntero a función
-        else:
-            return 4  # Default
+            """
+            Retorna el tamaño en bytes de un tipo
+            Convención MIPS 32-bit: 4 bytes para todo (primitivos y punteros).
+            """
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            if typ == INTEGER or typ == BOOLEAN:
+                return 4
+            elif typ == STRING:
+                return 4  # Puntero a string (era 8)
+            elif isinstance(typ, ArrayType):
+                return 4  # Puntero a array (era 8)
+            elif isinstance(typ, ClassType):
+                return 4  # Puntero a instancia (era 8)
+            elif isinstance(typ, FunctionType):
+                return 4  # Puntero a función (era 8)
+            else:
+                return 4  # Default
+            # --- ***** FIN DE CORRECCIÓN ***** ---
         
 # =============================
 # PASS 2: Chequeo de tipos/uso

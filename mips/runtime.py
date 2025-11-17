@@ -140,7 +140,7 @@ _strlen_end:
 # Ret:  $v0 = puntero al nuevo string (str1 + str2)
 # -----------------------------------------------------------------
 _string_concat:
-    subu $sp, $sp, 16     # Reservar stack
+    subu $sp, $sp, 16      # Reservar stack
     sw $ra, 12($sp)
     sw $s0, 8($sp)        # Guardar str1
     sw $s1, 4($sp)        # Guardar str2
@@ -149,13 +149,24 @@ _string_concat:
     move $s0, $a0         # $s0 = str1
     move $s1, $a1         # $s1 = str2
 
+    # --- ***** INICIO DE CORRECCIÓN (Manejo de Nulls) ***** ---
+    # Si $s0 (str1) es 0 (null), apuntarlo a _str_0 (string vacío global)
+    bne $s0, $zero, _sc_s1_ok
+    la $s0, _str_0
+_sc_s1_ok:
+    # Si $s1 (str2) es 0 (null), apuntarlo a _str_0 (string vacío global)
+    bne $s1, $zero, _sc_s2_ok
+    la $s1, _str_0
+_sc_s2_ok:
+    # --- ***** FIN DE CORRECCIÓN ***** ---
+
     # 1. Calcular largo total
     move $a0, $s0
     jal _string_len
     move $s2, $v0         # $s2 = len(str1)
 
     move $a0, $s1
-    jal _string_len
+    jal _string_len       # <-- Esta llamada (la línea 1430-ish) AHORA ES SEGURA
     add $s2, $s2, $v0     # $s2 = len(str1) + len(str2)
     addi $s2, $s2, 1      # +1 para null terminator
 
@@ -196,7 +207,7 @@ _concat_done:
     lw $s0, 8($sp)
     lw $ra, 12($sp)
     addu $sp, $sp, 16
-    jr $ra   
+    jr $ra  
     
 # -----------------------------------------------------------------
 # _int_to_string:

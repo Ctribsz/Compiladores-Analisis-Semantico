@@ -67,39 +67,32 @@ class TACGenerator(CompiscriptVisitor):
     
     def _get_field_offset(self, class_name: str, prop_name: str) -> int:
         """
-        Helper para obtener el offset de un campo, con HACKS para
-        corregir el layout de herencia.
-        
-        Layouts "Correctos" que forzamos:
-        Persona: nombre (0), edad (4), color (8)
-        Estudiante: nombre (0), edad (4), color (8), grado (12)
+        Helper para obtener el offset de un campo, LEYENDO EL SÍMBOLO
+        CAMINANDO LA JERARQUÍA DE CLASES.
         """
+        # --- ***** INICIO DE CORRECCIÓN (Quitar Hack) ***** ---
         
-        if prop_name == "nombre": return 0
-        if prop_name == "edad": return 4
-        if prop_name == "color": return 8
-        if prop_name == "grado": return 12 # Solo para Estudiante
+        current_class_sym = self.global_scope.resolve(class_name)
         
-        # --- Tu lógica original (como fallback si no coincide) ---
-        class_sym = self.global_scope.resolve(class_name)
-        if class_sym:
-            # Intentar buscar el símbolo del campo (esto es lo ideal)
-            field_sym = None
-            if hasattr(class_sym, 'field_symbols'):
-                field_sym = class_sym.field_symbols.get(prop_name)
-            elif hasattr(class_sym, 'scope'):
-                field_sym = class_sym.scope.resolve_local(prop_name)
+        while current_class_sym:
+            # 1. Buscar el scope de la clase actual
+            class_ctx = getattr(current_class_sym, "_ctx", None)
+            if class_ctx and class_ctx in self.scopes_by_ctx:
+                class_scope = self.scopes_by_ctx[class_ctx]
+                
+                # 2. Buscar el SÍMBOLO (VariableSymbol) en *este* scope (sin subir al padre)
+                field_sym = class_scope.symbols.get(prop_name)
+                
+                if field_sym and isinstance(field_sym, VariableSymbol):
+                    # 3. Si se encontró y tiene offset, ¡es este!
+                    if hasattr(field_sym, 'offset') and field_sym.offset is not None:
+                        return field_sym.offset
             
-            if field_sym and hasattr(field_sym, 'offset') and field_sym.offset is not None:
-                # Si la Fase 2 nos da un offset, usarlo (asumiendo que es correcto)
-                return field_sym.offset
+            # 4. Si no se encontró, pasar a la clase base
+            # (El SymbolCollector ya enlazó csym.base en _finalize_inheritance)
+            current_class_sym = current_class_sym.base
             
-            # Fallback (el que probablemente causa el bug)
-            try:
-                field_list = list(class_sym.fields.keys())
-                return field_list.index(prop_name) * 4
-            except:
-                pass
+        # --- ***** FIN DE CORRECCIÓN ***** ---
         
         print(f"ADVERTENCIA TAC: No se pudo determinar offset para {class_name}.{prop_name}, usando 0.")
         return 0 # Default-default
@@ -151,42 +144,47 @@ class TACGenerator(CompiscriptVisitor):
         if ctx.initializer():
             init_value = self.visit(ctx.initializer())
             
-            # Determinar si es global o local
-            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
-                
-                # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            # Un símbolo es local si:
+            # 1. Estamos en una función (self.in_function es True)
+            # 2. O, NO estamos en una función, PERO estamos en un scope anidado
+            #    (como el 'while' de 'main') Y el símbolo tiene un offset de local (>= 0).
+            is_local = False
+            if sym and hasattr(sym, 'offset') and sym.offset is not None:
+                if self.in_function:
+                    is_local = True # Es un local/param de FUNCIÓN
+                elif sym.offset >= 0:
+                    # Es un local de MAIN (como 'fk')
+                    is_local = True
+            
+            if is_local:
                 offset = sym.offset
                 
-                # Offsets >= 0 son LOCALES
+                # Offsets >= 0 son LOCALES (de función O de main)
                 if offset >= 0:
                     # Mapear a offset negativo desde $fp
-                    # +4 bytes por el $fp guardado. Asumimos que offset 0 es el primer local.
                     mips_offset = -(offset + 4)
                     fp_ref = TACOperand(f"FP[{mips_offset}]")
                 else:
-                    # Offsets < 0 son PARÁMETROS.
-                    # No deberíamos estar *declarando* un parámetro aquí,
-                    # pero si pasara, usamos la lógica de visitIdentifierExpr.
+                    # Offsets < 0 son PARÁMETROS (de función)
                     if self.current_class:
                         mips_offset = (-offset) + 8
                     else:
                         mips_offset = (-offset) + 4
                     fp_ref = TACOperand(f"FP[{mips_offset}]")
-                # --- ***** FIN DE CORRECCIÓN ***** ---
                 
-                # Línea original (borrar o comentar):
-                # fp_ref = TACOperand(f"FP[{sym.offset}]")
-
-                # CORRECTO: result, arg1, arg2
                 self.program.emit(TACOp.ASSIGN, result=fp_ref, arg1=init_value)
+            
             else:
-                # Variable global: (esta parte está bien)
+                # Variable global (como 'log', 'i', 'k')
                 if var_name not in self.global_addrs:
                     self.global_addrs[var_name] = hex(self.next_global_addr)
                     self.next_global_addr += 4
                 
                 addr_op = TACOperand(self.global_addrs[var_name])
                 self.program.emit(TACOp.ASSIGN, result=addr_op, arg1=init_value)
+            
+            # --- ***** FIN DE CORRECCIÓN ***** ---
             
             self._free_if_temp(init_value)
         
@@ -218,14 +216,21 @@ class TACGenerator(CompiscriptVisitor):
     def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
         """Maneja asignaciones"""
         if len(ctx.expression()) == 1:
-            # ... (esta parte de asignación simple está bien, no tocar) ...
             var_name = self._id(ctx)
             value = self.visit(ctx.expression(0))
             
             sym = self.current_scope.resolve(var_name)
             
-            if self.in_function and sym and hasattr(sym, 'offset') and sym.offset is not None:
-                # ... (toda la lógica de FP[] se queda igual) ...
+            # --- ***** INICIO DE CORRECCIÓN ***** ---
+            is_local = False
+            if sym and hasattr(sym, 'offset') and sym.offset is not None:
+                if self.in_function:
+                    is_local = True # Es un local/param de FUNCIÓN
+                elif sym.offset >= 0:
+                    # Es un local de MAIN (como 'fk')
+                    is_local = True
+            
+            if is_local:
                 offset = sym.offset
                 if offset >= 0:
                     mips_offset = -(offset + 4)
@@ -245,20 +250,18 @@ class TACGenerator(CompiscriptVisitor):
             else:
                 var_op = self._make_variable(var_name)
                 self.program.emit(TACOp.ASSIGN, result=var_op, arg1=value)
+            # --- ***** FIN DE CORRECCIÓN ***** ---
             
             self._free_if_temp(value)
         else:
             # Asignación a propiedad (this.nombre = ...)
-            obj = self.visit(ctx.expression(0)) # t15
-            prop_name = self._id(ctx) # "nombre"
-            value = self.visit(ctx.expression(1)) # t16
+            obj = self.visit(ctx.expression(0))
+            prop_name = self._id(ctx)
+            value = self.visit(ctx.expression(1))
             
-            # --- ***** INICIO DE CORRECCIÓN ***** ---
-            # Usar el nuevo helper
             obj_type_name = str(obj.typ)
             offset = self._get_field_offset(obj_type_name, prop_name)
             prop_op = self._make_constant(offset, 'integer')
-            # --- ***** FIN DE CORRECCIÓN ***** ---
             
             self.program.emit(TACOp.FIELD_ASSIGN, obj, prop_op, value)
             self._free_if_temp(value)
@@ -932,20 +935,29 @@ class TACGenerator(CompiscriptVisitor):
         
         sym_type = str(sym.typ) if hasattr(sym, 'typ') else None
 
-        # Caso 1: 'this' (esta parte está bien)
+        # Caso 1: 'this' (sin cambios)
         if self.in_function and self.current_class and name == "this":
             fp_ref = TACOperand("FP[8]", typ=sym_type) 
             temp_op = self.program.new_temp_operand(typ=sym_type)
             self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
             return temp_op
 
-        # Caso 2: Variable local o parámetro
-        if self.in_function and hasattr(sym, 'offset') and sym.offset is not None:
+        # --- ***** INICIO DE CORRECCIÓN ***** ---
+        # Caso 2: Variable local (en función) O local (en main)
+        is_local = False
+        if sym and hasattr(sym, 'offset') and sym.offset is not None:
+             if self.in_function:
+                 is_local = True # Es un local/param de FUNCIÓN
+             elif sym.offset >= 0:
+                 # Es un local de MAIN (como 'fk')
+                 is_local = True
+
+        if is_local:
+        # --- ***** FIN DE CORRECCIÓN ***** ---
             offset = sym.offset
             
-            # --- ***** INICIO DE CORRECCIÓN ***** ---
             if offset < 0: 
-                # Es PARÁMETRO (ej: -4). Mapear a offset positivo.
+                # Es PARÁMETRO (de función)
                 if self.current_class:
                     mips_offset = (-offset) + 8 # Método
                 else:
@@ -953,47 +965,17 @@ class TACGenerator(CompiscriptVisitor):
                 
                 fp_ref = TACOperand(f"FP[{mips_offset}]", typ=sym_type)
                 
-                # ¡LOS PARÁMETROS SE ACCEDEN DIRECTO!
-                # (El @ del TAC es confuso, pero el MIPS es lw/sw X($fp))
-                # La lógica original de DEREF para params era un HACK.
-                # Si tu MIPS generator traduce "@FP[8]" a "lw t1, 8($fp)",
-                # entonces necesitas emitir un DEREF aquí.
-                
-                # VAMOS A MANTENER TU LÓGICA DE DEREF PARA PARAMS
                 temp_op = self.program.new_temp_operand(typ=sym_type)
                 self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
                 return temp_op
             
             else:
-                # Es LOCAL (ej: 0, 4, 8). Mapear a offset negativo.
+                # Es LOCAL (de función O de main)
                 mips_offset = -(offset + 4)
-                fp_ref = TACOperand(f"FP[{mips_offset}]", typ=sym_type) # FP[-4], FP[-8]
-                
-                # ¡¡LOS LOCALES SE LEEN/ESCRIBEN DIRECTO!!
-                # El DEREF (@) es innecesario y causa la inconsistencia.
-                # Simplemente retorna el operando FP[-4].
-                # mips_generator.py sabe hacer "lw $t0, -4($fp)" de esto.
+                fp_ref = TACOperand(f"FP[{mips_offset}]", typ=sym_type)
                 return fp_ref
-            # --- ***** FIN DE CORRECCIÓN ***** ---
-            
-            # --- CÓDIGO ORIGINAL (BORRAR/COMENTAR) ---
-            # if offset < 0: 
-            #     if self.current_class:
-            #         offset = (-offset) + 8 
-            #     else:
-            #         offset = (-offset) + 4 
-            # 
-            # fp_ref = TACOperand(f"FP[{offset}]", typ=sym_type)
-            # 
-            # if offset > 0: 
-            #     temp_op = self.program.new_temp_operand(typ=sym_type)
-            #     self.program.emit(TACOp.DEREF, result=temp_op, arg1=fp_ref)
-            #     return temp_op
-            # else:
-            #     return fp_ref
-            # --- FIN CÓDIGO ORIGINAL ---
         
-        # Caso 3: Variable global (esta parte está bien)
+        # Caso 3: Variable global (como 'log', 'i', 'k')
         if name in self.global_addrs:
             addr_op = TACOperand(self.global_addrs[name])
             temp_op = self.program.new_temp_operand(typ=sym_type)

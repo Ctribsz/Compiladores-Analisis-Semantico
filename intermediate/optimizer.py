@@ -480,34 +480,20 @@ class TACOptimizer:
             
             # --- ***** INICIO DEL ARREGLO ***** ---
             if a1 is not None and str(a1) in copy_map:
-                new_name = copy_map[str(a1)] # e.g., "t1"
-                new_val = new_name
-                is_temp = _is_temp_name(new_name)
-                if is_temp:
-                    try:
-                        new_val = int(new_name[1:]) # "t1" -> 1
-                    except ValueError:
-                        pass # Keep "t_loop" as string
-
+                new_name = copy_map[str(a1)] # e.g., "t1" o "FP[-4]"
+                
                 a1 = TACOperand(
-                    value=new_val,
-                    is_temp=is_temp,
+                    value=new_name, # <-- Usar el new_name (string)
+                    is_temp=_is_temp_name(new_name), # <-- Recalcular is_temp
                     typ=a1.typ if hasattr(a1, 'typ') else None
                 )
             
             if a2 is not None and str(a2) in copy_map:
                 new_name = copy_map[str(a2)] # e.g., "t2"
-                new_val = new_name
-                is_temp = _is_temp_name(new_name)
-                if is_temp:
-                    try:
-                        new_val = int(new_name[1:]) # "t2" -> 2
-                    except ValueError:
-                        pass 
-
+                
                 a2 = TACOperand(
-                    value=new_val,
-                    is_temp=is_temp,
+                    value=new_name, # <-- Usar el new_name (string)
+                    is_temp=_is_temp_name(new_name), # <-- Recalcular is_temp
                     typ=a2.typ if hasattr(a2, 'typ') else None
                 )
             # --- ***** FIN DEL ARREGLO ***** ---
@@ -716,8 +702,11 @@ class TACOptimizer:
                     name = str(op)
                     if name in coloring:
                         # CORRECCIÓN: Crear nuevo operando, pero COPIAR el tipo del original
+                        new_color_num = coloring[name]
+                        new_name_str = f"t{new_color_num}" # Convertir 1 -> "t1"
+
                         return TACOperand(
-                            value=coloring[name],
+                            value=new_name_str, # Usar el STRING "t1"
                             is_temp=True,
                             typ=op.typ if hasattr(op, 'typ') else None
                         )
@@ -969,20 +958,11 @@ class TACOptimizer:
                 if a1 is not None and not _is_const(a1):
                     new_name = root(str(a1))
                     
-                    # --- ***** INICIO DEL ARREGLO ***** ---
-                    # Convierte "t1" -> 1, "t2" -> 2, etc.
-                    new_val = new_name
-                    is_temp = _is_temp_name(new_name)
-                    if is_temp:
-                        try:
-                            # "t1" -> 1. "t_loop" -> Falla y se queda como string
-                            new_val = int(new_name[1:]) 
-                        except ValueError:
-                            pass 
+                    # --- ***** INICIO DE CORRECCIÓN ***** ---
                     a1 = TACOperand(
-                        value=new_val,
-                        is_temp=is_temp,
-                    # --- ***** FIN DEL ARREGLO ***** ---
+                        value=new_name, # <-- Usar el new_name (string)
+                        is_temp=_is_temp_name(new_name), # <-- Recalcular
+                    # --- ***** FIN DE CORRECCIÓN ***** ---
                         typ=a1.typ if hasattr(a1, 'typ') else None
                     )
 
@@ -990,19 +970,11 @@ class TACOptimizer:
             if a2 is not None and not _is_const(a2):
                 new_name = root(str(a2))
 
-                # --- ***** INICIO DEL ARREGLO ***** ---
-                # Convierte "t2" -> 2
-                new_val = new_name
-                is_temp = _is_temp_name(new_name)
-                if is_temp:
-                    try:
-                        new_val = int(new_name[1:]) # "t2" -> 2
-                    except ValueError:
-                        pass
+                # --- ***** INICIO DE CORRECCIÓN ***** ---
                 a2 = TACOperand(
-                    value=new_val,
-                    is_temp=is_temp,
-                # --- ***** FIN DEL ARREGLO ***** ---
+                    value=new_name, # <-- Usar el new_name (string)
+                    is_temp=_is_temp_name(new_name), # <-- Recalcular
+                # --- ***** FIN DE CORRECCIÓN ***** ---
                     typ=a2.typ if hasattr(a2, 'typ') else None
                 )
             
